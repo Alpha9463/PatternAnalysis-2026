@@ -2,8 +2,12 @@
 
 Run from the repository root, for example::
 
-    python -m src.evaluate --model base --epochs 5
-    python -m src.evaluate --model siamese --epochs 5
+    python -m src.evaluate --config configs/base.yaml
+    python -m src.evaluate --config configs/siamese.yaml
+
+An explicit command-line value overrides the YAML setting::
+
+    python -m src.evaluate --config configs/base.yaml --epochs 10
 
 Both models use RGB 224-pixel images and the same patient split. The Siamese
 model scores images against a labelled gallery selected from training data.
@@ -17,7 +21,7 @@ import json
 import random
 from functools import partial
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 import torch
@@ -32,6 +36,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Subset
 
 from src.base_cnn import BaseCNN
+from src.config import RunConfig, load_run_config
 from src.load_images import ISICImageDataset, SiamesePairDataset, split_by_patient
 from src.siamese import SiameseNetwork
 from src.training_utils import select_device, set_seed, to_cpu, to_device
@@ -247,36 +252,54 @@ def metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict:
     }
 
 
-def main() -> None:
-    """Run training, validation threshold selection, and held-out testing."""
+def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
+    """Parse a YAML-configured run, with explicit CLI values taking precedence.
+
+    Parameters
+    ----------
+    argv : sequence of str or None, default=None
+        Arguments to parse. ``None`` reads the process command line.
+
+    Returns
+    -------
+    RunConfig
+        Validated training settings.
+    """
 
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--model", choices=("base", "siamese"), required=True)
-    parser.add_argument("--images-dir", type=Path)
-    parser.add_argument("--metadata-csv", type=Path)
+    parser.add_argument("--config", type=Path, metavar="PATH", default=None)
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent.parent / "data" / "runs",
+        "--model", choices=("base", "siamese"), default=argparse.SUPPRESS
     )
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--validation-fraction", type=float, default=0.15)
-    parser.add_argument("--test-fraction", type=float, default=0.15)
-    parser.add_argument("--target-recall", type=float, default=0.9)
-    parser.add_argument("--pairs-per-epoch", type=int, default=4096)
-    parser.add_argument("--gallery-per-class", type=int, default=100)
-    parser.add_argument("--neighbors", type=int, default=5)
+    parser.add_argument("--images-dir", type=Path, default=argparse.SUPPRESS)
+    parser.add_argument("--metadata-csv", type=Path, default=argparse.SUPPRESS)
+    parser.add_argument("--output-dir", type=Path, default=argparse.SUPPRESS)
+    parser.add_argument("--epochs", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--learning-rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--validation-fraction", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--test-fraction", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--target-recall", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--pairs-per-epoch", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--gallery-per-class", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--neighbors", type=int, default=argparse.SUPPRESS)
     parser.add_argument(
-        "--device", choices=("auto", "cpu", "mps", "cuda"), default="auto"
+        "--device",
+        choices=("auto", "cpu", "mps", "cuda"),
+        default=argparse.SUPPRESS,
     )
-    args = parser.parse_args()
-    if args.epochs < 1 or args.batch_size < 1 or args.learning_rate <= 0:
-        parser.error("epochs, batch-size, and learning-rate must be positive")
+    parsed = vars(parser.parse_args(argv))
+    config_path = parsed.pop("config")
+    return load_run_config(config_path, parsed)
+
+
+def main() -> None:
+    """Run training, validation threshold selection, and held-out testing."""
+
+    args = parse_run_config()
 
     set_seed(args.seed)
     device = select_device(args.device)

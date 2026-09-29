@@ -1,0 +1,9 @@
+# Siamese embedding model. Omitted settings use RunConfig defaults.
+model: siamese
+output_dir: data/runs/siamese
+epochs: 5
+batch_size: 16
+learning_rate: 0.001
+pairs_per_epoch: 4096
+gallery_per_class: 100
+neighbors: 5

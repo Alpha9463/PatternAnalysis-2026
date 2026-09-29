@@ -1,4 +1,5 @@
 torch
 numpy
-Pillow
+pillow
 scikit-learn
+pyyaml
