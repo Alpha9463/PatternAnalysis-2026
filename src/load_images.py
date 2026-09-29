@@ -4,7 +4,7 @@ Notes
 -----
 Use the training JPEG archive and its GroundTruth_v2 CSV from the ISIC 2020
 challenge. Images are decoded only when ``dataset[index]`` is called. Patient
-IDs remain available in ``dataset.samples`` for a later patient-level split.
+IDs remain available in ``dataset.samples`` for ``split_by_patient``.
 By default, images and the CSV are found under the repository's ``data``
 directory, regardless of the current working directory.
 
@@ -18,6 +18,8 @@ Create a dataset and read one labelled image::
 
 import argparse
 import csv
+import random
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -25,7 +27,7 @@ from typing import Callable
 import numpy as np
 import torch
 from PIL import Image, ImageOps
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -105,7 +107,9 @@ class ISICImageDataset(Dataset):
         transform: Callable[[Image.Image], torch.Tensor] | None = None,
     ) -> None:
         self.images_dir = (
-            Path(images_dir).expanduser() if images_dir is not None else DEFAULT_DATA_DIR
+            Path(images_dir).expanduser()
+            if images_dir is not None
+            else DEFAULT_DATA_DIR
         )
         if metadata_csv is None:
             matches = sorted(DEFAULT_DATA_DIR.rglob(DEFAULT_METADATA_NAME))
@@ -114,11 +118,15 @@ class ISICImageDataset(Dataset):
                     f"Multiple {DEFAULT_METADATA_NAME} files found under {DEFAULT_DATA_DIR}; "
                     "pass metadata_csv explicitly"
                 )
-            self.metadata_csv = matches[0] if matches else DEFAULT_DATA_DIR / DEFAULT_METADATA_NAME
+            self.metadata_csv = (
+                matches[0] if matches else DEFAULT_DATA_DIR / DEFAULT_METADATA_NAME
+            )
         else:
             self.metadata_csv = Path(metadata_csv).expanduser()
         if not self.images_dir.is_dir():
-            raise FileNotFoundError(f"Image directory does not exist: {self.images_dir}")
+            raise FileNotFoundError(
+                f"Image directory does not exist: {self.images_dir}"
+            )
         if not self.metadata_csv.is_file():
             raise FileNotFoundError(f"Metadata CSV does not exist: {self.metadata_csv}")
         if color_mode not in {"RGB", "L"}:
@@ -131,7 +139,9 @@ class ISICImageDataset(Dataset):
         self.samples = self._read_metadata(self.metadata_csv, image_paths)
 
     @staticmethod
-    def _validate_image_size(size: int | tuple[int, int] | None) -> tuple[int, int] | None:
+    def _validate_image_size(
+        size: int | tuple[int, int] | None,
+    ) -> tuple[int, int] | None:
         """Convert a square side length to a PIL-compatible size.
 
         Parameters
@@ -156,8 +166,12 @@ class ISICImageDataset(Dataset):
             return None
         if isinstance(size, int):
             size = (size, size)
-        if len(size) != 2 or any(not isinstance(side, int) or side <= 0 for side in size):
-            raise ValueError("image_size must be a positive int, (width, height), or None")
+        if len(size) != 2 or any(
+            not isinstance(side, int) or side <= 0 for side in size
+        ):
+            raise ValueError(
+                "image_size must be a positive int, (width, height), or None"
+            )
         return size
 
     @staticmethod
@@ -194,7 +208,9 @@ class ISICImageDataset(Dataset):
         return paths
 
     @staticmethod
-    def _read_metadata(metadata_csv: Path, image_paths: dict[str, Path]) -> list[ISICSample]:
+    def _read_metadata(
+        metadata_csv: Path, image_paths: dict[str, Path]
+    ) -> list[ISICSample]:
         """Match CSV labels and patient IDs to indexed JPEG paths.
 
         Parameters
@@ -225,29 +241,37 @@ class ISICImageDataset(Dataset):
             reader = csv.DictReader(stream)
             required = {"image_name", "patient_id", "target"}
             if not reader.fieldnames or not required.issubset(reader.fieldnames):
-                raise ValueError(f"Metadata CSV needs columns: {', '.join(sorted(required))}")
+                raise ValueError(
+                    f"Metadata CSV needs columns: {', '.join(sorted(required))}"
+                )
             for row_number, row in enumerate(reader, start=2):
                 image_name = (row["image_name"] or "").strip()
                 patient_id = (row["patient_id"] or "").strip()
                 target = (row["target"] or "").strip()
                 if not image_name or not patient_id:
-                    raise ValueError(f"Missing image_name or patient_id on CSV row {row_number}")
+                    raise ValueError(
+                        f"Missing image_name or patient_id on CSV row {row_number}"
+                    )
                 if image_name in seen_names:
                     raise ValueError(f"Duplicate image_name in metadata: {image_name}")
                 seen_names.add(image_name)
                 if target not in {"0", "1"}:
-                    raise ValueError(f"Invalid target {target!r} for {image_name}; expected 0 or 1")
+                    raise ValueError(
+                        f"Invalid target {target!r} for {image_name}; expected 0 or 1"
+                    )
                 path = image_paths.get(image_name)
                 if path is None:
                     missing_images.append(image_name)
                     continue
-                samples.append(ISICSample(
-                    image_name=image_name,
-                    patient_id=patient_id,
-                    lesion_id=(row.get("lesion_id") or "").strip() or None,
-                    label=int(target),
-                    path=path,
-                ))
+                samples.append(
+                    ISICSample(
+                        image_name=image_name,
+                        patient_id=patient_id,
+                        lesion_id=(row.get("lesion_id") or "").strip() or None,
+                        label=int(target),
+                        path=path,
+                    )
+                )
         if missing_images:
             examples = ", ".join(missing_images[:5])
             raise FileNotFoundError(
@@ -311,6 +335,185 @@ class ISICImageDataset(Dataset):
             image_tensor = self.transform(image)
         label = torch.tensor(sample.label, dtype=torch.long)
         return image_tensor, label
+
+
+def split_by_patient(
+    dataset: ISICImageDataset,
+    validation_fraction: float = 0.15,
+    test_fraction: float = 0.15,
+    seed: int = 42,
+) -> tuple[Subset, Subset, Subset]:
+    """Create reproducible train, validation, and test image subsets.
+
+    Patients are stratified by whether any of their images is melanoma. All
+    images from one patient stay in the same subset.
+
+    Parameters
+    ----------
+    dataset : ISICImageDataset
+        Dataset containing labelled images and patient identifiers.
+    validation_fraction : float, default=0.15
+        Fraction of patients reserved for validation.
+    test_fraction : float, default=0.15
+        Fraction of patients reserved for the final test.
+    seed : int, default=42
+        Seed used to shuffle patient identifiers.
+
+    Returns
+    -------
+    train : torch.utils.data.Subset
+        Images from training patients.
+    validation : torch.utils.data.Subset
+        Images from validation patients.
+    test : torch.utils.data.Subset
+        Images from test patients.
+
+    Raises
+    ------
+    ValueError
+        If fractions are invalid or too few patients exist in either stratum.
+    """
+
+    if not 0 < validation_fraction < 1 or not 0 < test_fraction < 1:
+        raise ValueError("Validation and test fractions must be between 0 and 1")
+    if validation_fraction + test_fraction >= 1:
+        raise ValueError("Validation and test fractions must sum to less than 1")
+
+    patient_labels: dict[str, int] = {}
+    for sample in dataset.samples:
+        patient_labels[sample.patient_id] = max(
+            patient_labels.get(sample.patient_id, 0), sample.label
+        )
+
+    rng = random.Random(seed)
+    partition: dict[str, str] = {}
+    for label in (0, 1):
+        patients = sorted(
+            pid for pid, target in patient_labels.items() if target == label
+        )
+        if len(patients) < 3:
+            raise ValueError(f"At least three patients are needed in stratum {label}")
+        rng.shuffle(patients)
+        n_validation = max(1, round(len(patients) * validation_fraction))
+        n_test = max(1, round(len(patients) * test_fraction))
+        if n_validation + n_test >= len(patients):
+            raise ValueError(f"Fractions leave no training patients in stratum {label}")
+        for pid in patients[:n_validation]:
+            partition[pid] = "validation"
+        for pid in patients[n_validation : n_validation + n_test]:
+            partition[pid] = "test"
+        for pid in patients[n_validation + n_test :]:
+            partition[pid] = "train"
+
+    indices: dict[str, list[int]] = {
+        name: [] for name in ("train", "validation", "test")
+    }
+    for index, sample in enumerate(dataset.samples):
+        indices[partition[sample.patient_id]].append(index)
+    return (
+        Subset(dataset, indices["train"]),
+        Subset(dataset, indices["validation"]),
+        Subset(dataset, indices["test"]),
+    )
+
+
+class SiamesePairDataset(Dataset):
+    """Draw balanced same-label and different-label pairs from training data.
+
+    Parameters
+    ----------
+    subset : torch.utils.data.Subset
+        Patient-separated training subset of an ISICImageDataset.
+    pairs_per_epoch : int or None, default=None
+        Number of sampled pairs per epoch. Defaults to the number of images.
+    seed : int, default=42
+        Base seed for reproducible pair selection.
+
+    Notes
+    -----
+    Pair members always come from different patients. Call ``set_epoch``
+    before each training epoch to draw a new deterministic set of pairs.
+    Targets are 1 for matching labels and 0 for different labels.
+    """
+
+    def __init__(
+        self, subset: Subset, pairs_per_epoch: int | None = None, seed: int = 42
+    ) -> None:
+        if not isinstance(subset.dataset, ISICImageDataset):
+            raise TypeError("subset must wrap an ISICImageDataset")
+        self.dataset = subset.dataset
+        self.indices = list(subset.indices)
+        self.pairs_per_epoch = (
+            len(self.indices) if pairs_per_epoch is None else pairs_per_epoch
+        )
+        if self.pairs_per_epoch <= 0:
+            raise ValueError("pairs_per_epoch must be positive")
+        self.seed = seed
+        self.epoch = 0
+        self.by_label: dict[int, dict[str, list[int]]] = {
+            0: defaultdict(list),
+            1: defaultdict(list),
+        }
+        for index in self.indices:
+            sample = self.dataset.samples[index]
+            self.by_label[sample.label][sample.patient_id].append(index)
+        if any(len(self.by_label[label]) < 2 for label in (0, 1)):
+            raise ValueError(
+                "Each label needs images from at least two training patients"
+            )
+
+    def set_epoch(self, epoch: int) -> None:
+        """Select a reproducible pair stream for an epoch.
+
+        Parameters
+        ----------
+        epoch : int
+            Zero-based training epoch.
+        """
+
+        self.epoch = epoch
+
+    def __len__(self) -> int:
+        """Return the number of pairs drawn per epoch."""
+
+        return self.pairs_per_epoch
+
+    def __getitem__(
+        self, index: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Load a pair and its same-label target.
+
+        Parameters
+        ----------
+        index : int
+            Pair position in this epoch.
+
+        Returns
+        -------
+        first : torch.Tensor
+            First RGB image.
+        second : torch.Tensor
+            Second RGB image from a different patient.
+        same_label : torch.Tensor
+            Float32 scalar, 1 for matching labels and 0 otherwise.
+        """
+
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        rng = random.Random(self.seed + self.epoch * self.pairs_per_epoch + index)
+        first_label = rng.randrange(2)
+        same = index % 2 == 0
+        second_label = first_label if same else 1 - first_label
+        first_patient = rng.choice(sorted(self.by_label[first_label]))
+        possible_second = sorted(
+            pid for pid in self.by_label[second_label] if pid != first_patient
+        )
+        second_patient = rng.choice(possible_second)
+        first_index = rng.choice(self.by_label[first_label][first_patient])
+        second_index = rng.choice(self.by_label[second_label][second_patient])
+        first, _ = self.dataset[first_index]
+        second, _ = self.dataset[second_index]
+        return first, second, torch.tensor(float(same), dtype=torch.float32)
 
 
 def main() -> None:
