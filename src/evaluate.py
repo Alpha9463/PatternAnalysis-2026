@@ -35,10 +35,10 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Subset
 
-from src.base_cnn import BaseCNN
+from src.models.base_cnn import BaseCNN
 from src.config import RunConfig, load_run_config
 from src.load_images import ISICImageDataset, SiamesePairDataset, split_by_patient
-from src.siamese import SiameseNetwork
+from src.models.siamese import SiameseNetwork
 from src.training_utils import select_device, set_seed, to_cpu, to_device
 
 
