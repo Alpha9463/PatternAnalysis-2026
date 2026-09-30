@@ -1,4 +1,5 @@
 # Pattern Analysis
+
 Pattern Analysis of various datasets by COMP3710 students in 2025 at the University of Queensland.
 
 We create pattern recognition and image processing library for Tensorflow (TF), PyTorch or JAX.
@@ -7,7 +8,7 @@ This library is created and maintained by The University of Queensland [COMP3710
 
 The library includes the following implemented in Tensorflow:
 
-* fractals 
+* fractals
 * recognition problems
 
 In the recognition folder, you will find many recognition problems solved including:
@@ -45,3 +46,18 @@ Command-line values override the YAML file, which makes short experiment variant
 ```bash
 python -m src.evaluate --config configs/base.yaml --epochs 10 --batch-size 8
 ```
+
+### Visualising a completed run
+
+Create report-ready SVGs from one saved run:
+
+```bash
+python -m src.visualize --run-dir data/runs/base
+```
+
+The script writes these files under `data/runs/base/figures/`:
+
+* Training loss and validation average precision by epoch
+* Test confusion matrix
+* Test ROC and precision-recall curves
+* Test score distributions with the validation-selected threshold
