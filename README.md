@@ -1,63 +1,13 @@
 # Pattern Analysis
 
-Pattern Analysis of various datasets by COMP3710 students in 2025 at the University of Queensland.
+Pattern-recognition coursework repository for COMP3710 at The University of
+Queensland.
 
-We create pattern recognition and image processing library for Tensorflow (TF), PyTorch or JAX.
+## ISIC 2020 melanoma project
 
-This library is created and maintained by The University of Queensland [COMP3710](https://my.uq.edu.au/programs-courses/course.html?course_code=comp3710) students.
-
-The library includes the following implemented in Tensorflow:
-
-* fractals
-* recognition problems
-
-In the recognition folder, you will find many recognition problems solved including:
-
-* segmentation
-* classification
-* graph neural networks
-* StyleGAN
-* Stable diffusion
-* transformers
-etc.
-
-## ISIC melanoma experiments
-
-Run a configured direct-CNN baseline from the repository root:
-
-```bash
-python -m src.evaluate --config configs/base.yaml
-```
-
-Run the Siamese model:
-
-```bash
-python -m src.evaluate --config configs/siamese.yaml
-```
-
-Both example YAML files use the loader's default local `data` directory. Every omitted setting uses the defaults in `src/config.py`. In particular, `device: auto` is the default: CUDA is chosen when available, then Apple MPS, then CPU. Add an explicit device only when you need to force one:
-
-```bash
-python -m src.evaluate --config configs/base.yaml --device mps
-```
-
-Command-line values override the YAML file, which makes short experiment variants easy to run:
-
-```bash
-python -m src.evaluate --config configs/base.yaml --epochs 10 --batch-size 8
-```
-
-### Visualising a completed run
-
-Create report-ready SVGs from one saved run:
-
-```bash
-python -m src.visualize --run-dir data/runs/base
-```
-
-The script writes these files under `data/runs/base/figures/`:
-
-* Training loss and validation average precision by epoch
-* Test confusion matrix
-* Test ROC and precision-recall curves
-* Test score distributions with the validation-selected threshold
+The active assessment implementation is
+[recognition/Siamese_ISIC2020_Melanoma](recognition/Siamese_ISIC2020_Melanoma/README.md).
+It contains the required `modules.py`, `dataset.py`, `train.py`, `predict.py`,
+and project report README. Dataset files, split manifests, model checkpoints,
+metrics, predictions, and generated run figures stay under the ignored `data/`
+folder.

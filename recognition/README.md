@@ -1,10 +1,4 @@
-# Recognition Tasks
-Various recognition tasks solved in deep learning frameworks.
+# Recognition tasks
 
-Tasks may include:
-* Image Segmentation
-* Object detection
-* Graph node classification
-* Image super resolution
-* Disease classification
-* Generative modelling with StyleGAN and Stable Diffusion
+The active COMP3710 assessment project is
+[ISIC 2020 Melanoma Triage with Siamese Metric Learning](Siamese_ISIC2020_Melanoma/README.md).

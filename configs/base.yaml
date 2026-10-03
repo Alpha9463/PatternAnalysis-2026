@@ -1,6 +1,0 @@
-# Direct CNN baseline. Omitted settings use RunConfig defaults.
-model: base
-output_dir: data/runs/base
-epochs: 5
-batch_size: 16
-learning_rate: 0.001
