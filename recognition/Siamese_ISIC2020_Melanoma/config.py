@@ -7,7 +7,10 @@ from typing import Any, Literal, Mapping
 
 import yaml
 
-from dataset import default_data_dir, repository_root
+from recognition.Siamese_ISIC2020_Melanoma.dataset import (
+    default_data_dir,
+    repository_root,
+)
 
 
 ModelName = Literal["base", "siamese"]
