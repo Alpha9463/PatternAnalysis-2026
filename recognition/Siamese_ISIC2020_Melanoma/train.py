@@ -348,15 +348,11 @@ def profile_model(
     device_images = to_device(images, device)
     model.eval()
 
-    @torch.no_grad()
-    def forward_once() -> torch.Tensor:
-        if isinstance(model, BaseCNN):
-            return model(device_images)
-        return model.forward_once(device_images)
-
     return {
         "parameter_count": count_parameters(model),
-        "inference_latency_ms": measure_inference_latency_ms(forward_once, device),
+        "inference_latency_ms": measure_inference_latency_ms(
+            partial(model_forward, model, device_images), device
+        ),
         "latency_scope": "model_forward_fixed_validation_batch",
         "accelerator_memory_bytes": peak_accelerator_memory_bytes(device),
         "accelerator_memory_kind": (
@@ -365,6 +361,17 @@ def profile_model(
             else ("mps_current_allocated" if device.type == "mps" else None)
         ),
     }
+
+
+@torch.no_grad()
+def model_forward(
+    model: BaseCNN | SiameseNetwork, images: torch.Tensor
+) -> torch.Tensor:
+    """Run the model's single-image inference path for profiling."""
+
+    if isinstance(model, BaseCNN):
+        return model(images)
+    return model.forward_once(images)
 
 
 def write_predictions(
@@ -533,6 +540,7 @@ def main() -> None:
             "test_fraction": args.test_fraction,
         },
         "gallery_image_names": gallery_image_names,
+        "scoring": {"neighbors": args.neighbors if gallery_image_names else None},
         "decision_rule": decision_rule,
     }
     save_checkpoint(run_directory / "checkpoint.pt", checkpoint)
