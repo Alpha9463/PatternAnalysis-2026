@@ -1,0 +1,14 @@
+# Siamese embedding model on the same fixed patient-level ISIC split.
+model: siamese
+run_name: siamese_seed42
+output_dir: data/runs
+split_manifest: data/splits/isic_seed42.json
+epochs: 5
+batch_size: 16
+learning_rate: 0.001
+seed: 42
+validation_fraction: 0.15
+test_fraction: 0.15
+pairs_per_epoch: 4096
+gallery_per_class: 100
+neighbors: 5

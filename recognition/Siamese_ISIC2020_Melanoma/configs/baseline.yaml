@@ -1,0 +1,11 @@
+# Direct CNN baseline on the fixed patient-level ISIC split.
+model: base
+run_name: baseline_seed42
+output_dir: data/runs
+split_manifest: data/splits/isic_seed42.json
+epochs: 5
+batch_size: 16
+learning_rate: 0.001
+seed: 42
+validation_fraction: 0.15
+test_fraction: 0.15
