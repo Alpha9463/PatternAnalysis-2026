@@ -3,8 +3,8 @@
 Run from the repository root::
 
     /Users/alexanderson/venvs/comp3710/bin/python -m \
-      recognition.Siamese_ISIC2020_Melanoma.train \
-      --config recognition/Siamese_ISIC2020_Melanoma/configs/baseline.yaml
+      recognition.Siamese_ISIC2020_Melanoma_47472442.train \
+      --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/baseline.yaml
 
 The validation partition chooses the best checkpoint and triage rule. Held-out
 test labels are used only for final evaluation and saved reporting artifacts.
@@ -31,19 +31,19 @@ from torch import nn
 from torch.nn import functional as functional
 from torch.utils.data import DataLoader, Subset
 
-from recognition.Siamese_ISIC2020_Melanoma.config import RunConfig, load_run_config
-from recognition.Siamese_ISIC2020_Melanoma.dataset import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.config import RunConfig, load_run_config
+from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     ISICImageDataset,
     SiamesePairDataset,
     SplitIndices,
     load_or_create_split_manifest,
 )
-from recognition.Siamese_ISIC2020_Melanoma.modules import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
     BaseCNN,
     SiameseNetwork,
     build_model,
 )
-from recognition.Siamese_ISIC2020_Melanoma.utils import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     apply_triage_rule,
     cpu_state_dict,
     count_parameters,
@@ -57,7 +57,7 @@ from recognition.Siamese_ISIC2020_Melanoma.utils import (
     to_cpu,
     to_device,
 )
-from recognition.Siamese_ISIC2020_Melanoma.visualisation import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
     plot_training_history,
 )
 

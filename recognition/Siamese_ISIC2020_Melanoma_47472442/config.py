@@ -7,7 +7,7 @@ from typing import Any, Literal, Mapping
 
 import yaml
 
-from recognition.Siamese_ISIC2020_Melanoma.dataset import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     default_data_dir,
     repository_root,
 )

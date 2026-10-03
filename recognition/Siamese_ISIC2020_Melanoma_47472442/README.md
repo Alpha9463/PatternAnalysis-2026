@@ -59,7 +59,7 @@ environment:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r recognition/Siamese_ISIC2020_Melanoma/requirements.txt
+python -m pip install -r recognition/Siamese_ISIC2020_Melanoma_47472442/requirements.txt
 ```
 
 Run every command from the repository root. The default `--device auto` chooses
@@ -91,15 +91,15 @@ partition.
 Run the direct CNN baseline:
 
 ```bash
-python -m recognition.Siamese_ISIC2020_Melanoma.train \
-  --config recognition/Siamese_ISIC2020_Melanoma/configs/baseline.yaml
+python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
+  --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/baseline.yaml
 ```
 
 Run the Siamese experiment on the same persisted split:
 
 ```bash
-python -m recognition.Siamese_ISIC2020_Melanoma.train \
-  --config recognition/Siamese_ISIC2020_Melanoma/configs/siamese.yaml
+python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
+  --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/siamese.yaml
 ```
 
 Each run saves `checkpoint.pt`, `metrics.json`, `test_predictions.csv`, and
@@ -111,7 +111,7 @@ band are selected from validation data, then frozen before held-out test scoring
 Reload a completed baseline run without retraining:
 
 ```bash
-python -m recognition.Siamese_ISIC2020_Melanoma.predict \
+python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
   --checkpoint data/runs/baseline_seed42/checkpoint.pt \
   --metrics data/runs/baseline_seed42/metrics.json \
   --output-dir data/runs/baseline_seed42/predictions

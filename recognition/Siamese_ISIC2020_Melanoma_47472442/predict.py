@@ -3,7 +3,7 @@
 Run from the repository root after a completed training run::
 
     /Users/alexanderson/venvs/comp3710/bin/python -m \
-      recognition.Siamese_ISIC2020_Melanoma.predict \
+      recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
       --checkpoint data/runs/baseline_seed42/checkpoint.pt
 
 This command never trains a model, changes a patient split, resamples a
@@ -26,25 +26,25 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from recognition.Siamese_ISIC2020_Melanoma.dataset import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     ISICImageDataset,
     SplitIndices,
     load_or_create_split_manifest,
     repository_root,
 )
-from recognition.Siamese_ISIC2020_Melanoma.modules import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
     BaseCNN,
     ModelName,
     SiameseNetwork,
     build_model,
 )
-from recognition.Siamese_ISIC2020_Melanoma.train import score_base, score_siamese
-from recognition.Siamese_ISIC2020_Melanoma.utils import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.train import score_base, score_siamese
+from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     apply_triage_rule,
     load_checkpoint,
     select_device,
 )
-from recognition.Siamese_ISIC2020_Melanoma.visualisation import (
+from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
     Prediction,
     plot_failure_cases,
     plot_prediction_score_distribution,
