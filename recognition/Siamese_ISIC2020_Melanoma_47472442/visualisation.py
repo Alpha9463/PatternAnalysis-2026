@@ -1,10 +1,17 @@
-"""SVG plotting helpers for ISIC training artifacts."""
+"""SVG plotting helpers and offline ROC/PR generation from saved ISIC artifacts.
 
+Run this module with ``--run-dir`` to plot saved prediction scores and the
+validation-derived threshold.
+"""
+
+import argparse
+import csv
+import json
 import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplotlib"))
@@ -16,7 +23,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from numpy.typing import NDArray
 from PIL import Image, ImageOps
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +130,223 @@ def plot_training_history(
     return output_path
 
 
+def plot_roc_precision_recall(
+    labels: Sequence[int],
+    scores: Sequence[float],
+    threshold: float,
+    output_path: Path,
+    title: str = "Melanoma classification",
+) -> Path:
+    """Write ROC and melanoma precision–recall curves to one SVG.
+
+    Parameters
+    ----------
+    labels : sequence of int
+        Ground-truth image labels: 0 for benign and 1 for melanoma.
+    scores : sequence of float
+        Melanoma ranking scores, with larger values indicating melanoma.
+        Signed gallery scores are supported; probabilities are not required.
+    threshold : float
+        Frozen validation-derived binary decision threshold. This function
+        never selects a threshold from the plotted labels.
+    output_path : pathlib.Path
+        SVG destination. Parent directories are created when needed.
+    title : str, default="Melanoma classification"
+        Figure title, followed by image and melanoma counts.
+
+    Returns
+    -------
+    pathlib.Path
+        Written SVG path.
+
+    Raises
+    ------
+    ValueError
+        If inputs are empty, differ in length, lack either binary class,
+        contain non-finite scores or threshold, or the output is not SVG.
+
+    Notes
+    -----
+    PR performance uses average precision, not trapezoidal integration.
+    Precision is undefined when the frozen threshold predicts no positives;
+    in that case only the ROC operating point is marked.
+    """
+
+    actual, ranking_scores = _curve_arrays(labels, scores)
+    if not isfinite(threshold):
+        raise ValueError("The frozen decision threshold must be finite")
+    if output_path.suffix.lower() != ".svg":
+        raise ValueError("The ROC/PR output path must have an .svg suffix")
+
+    false_positive_rate, recall, _ = roc_curve(actual, ranking_scores, pos_label=1)
+    precision, pr_recall, _ = precision_recall_curve(
+        actual, ranking_scores, pos_label=1
+    )
+    positive_count = int(np.count_nonzero(actual == 1))
+    predicted_positive = ranking_scores >= threshold
+    true_positives = int(np.count_nonzero(predicted_positive & (actual == 1)))
+    false_positives = int(np.count_nonzero(predicted_positive & (actual == 0)))
+    point_recall = true_positives / positive_count
+    point_fpr = false_positives / int(np.count_nonzero(actual == 0))
+    prediction_count = int(np.count_nonzero(predicted_positive))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with plt.rc_context(
+        {"font.size": 10, "svg.fonttype": "none", "svg.hashsalt": "isic-roc-pr"}
+    ):
+        figure, axes = plt.subplots(1, 2, figsize=(11.5, 4.6))
+        roc_axis, pr_axis = axes
+        roc_axis.plot(
+            false_positive_rate,
+            recall,
+            color="#087e83",
+            label=f"AUROC = {roc_auc_score(actual, ranking_scores):.4f}",
+        )
+        roc_axis.plot(
+            [0, 1], [0, 1], color="#8b949e", linestyle="--", label="Chance ranking"
+        )
+        roc_axis.scatter(
+            [point_fpr],
+            [point_recall],
+            color="#c45c35",
+            zorder=3,
+            label="Frozen validation threshold",
+        )
+        roc_axis.set(
+            xlabel="Benign false-positive rate",
+            ylabel="Melanoma recall",
+            title="ROC: sensitivity versus false positives",
+        )
+        pr_axis.plot(
+            pr_recall,
+            precision,
+            color="#087e83",
+            label=f"Average precision = {average_precision_score(actual, ranking_scores):.4f}",
+        )
+        pr_axis.axhline(
+            positive_count / len(actual),
+            color="#8b949e",
+            linestyle="--",
+            label=f"Positive prevalence = {positive_count / len(actual):.2%}",
+        )
+        if prediction_count:
+            pr_axis.scatter(
+                [point_recall],
+                [true_positives / prediction_count],
+                color="#c45c35",
+                zorder=3,
+                label="Frozen validation threshold",
+            )
+        else:
+            pr_axis.text(
+                0.5,
+                0.5,
+                "No positive predictions at the frozen threshold",
+                transform=pr_axis.transAxes,
+                horizontalalignment="center",
+                fontsize=9,
+            )
+        pr_axis.set(
+            xlabel="Melanoma recall",
+            ylabel="Melanoma precision",
+            title="Precision–recall on saved image population",
+        )
+        for axis, location in ((roc_axis, "lower right"), (pr_axis, "upper right")):
+            axis.set(xlim=(0, 1), ylim=(0, 1.02))
+            axis.legend(loc=location, fontsize=8.5)
+            axis.grid(alpha=0.18)
+            axis.spines[["top", "right"]].set_visible(False)
+        figure.suptitle(
+            f"{title} · {len(actual):,} images / {positive_count:,} melanomas",
+            fontsize=13,
+            fontweight="bold",
+        )
+        _save_svg(
+            figure,
+            output_path,
+            description="Calculated from saved image labels and scores; no model execution.",
+        )
+    return output_path
+
+
+def load_roc_artifacts(run_directory: Path) -> tuple[list[int], list[float], float]:
+    """Read saved scores and the frozen binary threshold from a run.
+
+    Parameters
+    ----------
+    run_directory : pathlib.Path
+        Directory containing ``test_predictions.csv`` with ``actual`` and
+        ``score`` columns, and ``metrics.json`` with ``decision_rule.threshold``.
+
+    Returns
+    -------
+    labels : list of int
+        Ground-truth image labels in CSV order.
+    scores : list of float
+        Corresponding saved melanoma scores.
+    threshold : float
+        Frozen validation-derived threshold recorded in the metrics file.
+
+    Raises
+    ------
+    ValueError
+        If required CSV fields or a finite numeric threshold are missing,
+        or prediction rows cannot be parsed.
+    """
+
+    labels: list[int] = []
+    scores: list[float] = []
+    predictions_path = run_directory / "test_predictions.csv"
+    with predictions_path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if not {"actual", "score"}.issubset(reader.fieldnames or []):
+            raise ValueError("Prediction CSV needs actual and score columns")
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                labels.append(int(row["actual"]))
+                scores.append(float(row["score"]))
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Invalid prediction values in {predictions_path}, line {line_number}"
+                ) from error
+
+    with (run_directory / "metrics.json").open(encoding="utf-8") as stream:
+        report: object = json.load(stream)
+    if not isinstance(report, Mapping):
+        raise ValueError("Metrics JSON must contain an object")
+    decision_rule = report.get("decision_rule")
+    if not isinstance(decision_rule, Mapping):
+        raise ValueError("Metrics JSON needs a saved decision_rule")
+    threshold = decision_rule.get("threshold")
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not isfinite(threshold)
+    ):
+        raise ValueError("Metrics decision_rule needs a finite numeric threshold")
+    return labels, scores, float(threshold)
+
+
+def _curve_arrays(
+    labels: Sequence[int], scores: Sequence[float]
+) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
+    """Validate paired binary labels and finite ranking scores for ROC/PR."""
+
+    actual = np.asarray(labels)
+    ranking_scores = np.asarray(scores, dtype=np.float64)
+    if actual.ndim != 1 or ranking_scores.ndim != 1:
+        raise ValueError("Labels and scores must be one-dimensional")
+    if len(actual) == 0 or len(actual) != len(ranking_scores):
+        raise ValueError("Labels and scores must be non-empty and equal in length")
+    if not np.isin(actual, (0, 1)).all() or np.unique(actual).size != 2:
+        raise ValueError(
+            "ROC/PR curves require both benign (0) and melanoma (1) labels"
+        )
+    if not np.isfinite(ranking_scores).all():
+        raise ValueError("Prediction scores must be finite")
+    return actual.astype(np.int64), ranking_scores
+
+
 def plot_prediction_score_distribution(
     predictions: Sequence[Prediction],
     decision_rule: Mapping[str, float],
@@ -192,9 +423,7 @@ def plot_prediction_score_distribution(
     return output_path
 
 
-def plot_failure_cases(
-    predictions: Sequence[Prediction], output_path: Path
-) -> Path:
+def plot_failure_cases(predictions: Sequence[Prediction], output_path: Path) -> Path:
     """Write an SVG montage labelled with selected held-out decisions.
 
     Parameters
@@ -265,9 +494,55 @@ def _prediction_title(prediction: Prediction) -> str:
     )
 
 
-def _save_svg(figure: Figure, output_path: Path) -> None:
+def _save_svg(
+    figure: Figure, output_path: Path, *, description: str | None = None
+) -> None:
     """Save a figure as SVG and release its Matplotlib resources."""
 
-    figure.tight_layout()
-    figure.savefig(output_path, format="svg", bbox_inches="tight")
-    plt.close(figure)
+    metadata = {"Date": None, "Description": description} if description else None
+    try:
+        figure.tight_layout()
+        figure.savefig(
+            output_path, format="svg", bbox_inches="tight", metadata=metadata
+        )
+    finally:
+        plt.close(figure)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Generate an ROC/PR SVG from saved artifacts without model execution.
+
+    Parameters
+    ----------
+    argv : sequence of str or None, default=None
+        Command-line arguments. ``None`` reads the process arguments.
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Plot ROC and precision–recall curves from saved run artifacts."
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Run directory containing test_predictions.csv and metrics.json.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="SVG destination; defaults to <run-dir>/test_roc_pr.svg.",
+    )
+    parser.add_argument(
+        "--title", default="Melanoma classification", help="Figure title prefix."
+    )
+    args = parser.parse_args(argv)
+    labels, scores, threshold = load_roc_artifacts(args.run_dir)
+    output_path = args.output or args.run_dir / "test_roc_pr.svg"
+    saved_path = plot_roc_precision_recall(
+        labels, scores, threshold, output_path, args.title
+    )
+    print(f"Saved {saved_path}")
+
+
+if __name__ == "__main__":
+    main()
