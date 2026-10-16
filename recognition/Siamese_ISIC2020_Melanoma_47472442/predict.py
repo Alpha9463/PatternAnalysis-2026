@@ -4,17 +4,20 @@ Run from the repository root after a completed training run::
 
     /Users/alexanderson/venvs/comp3710/bin/python -m \
       recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-      --checkpoint data/runs/baseline_seed42/checkpoint.pt
+      --checkpoint data/runs/baseline_v2_seed42/checkpoint.pt
 
 This command never trains a model, changes a patient split, resamples a
 Siamese gallery, or chooses a new decision threshold. It applies the
-validation-derived policy saved in the checkpoint.
+saved policy. Prediction defaults to calibration; final patients require
+``--partition final --evaluate-final --evaluation-note``.
 """
 
 import argparse
 import csv
 import json
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 from functools import partial
 from math import isfinite
@@ -28,8 +31,7 @@ from torch.utils.data import DataLoader, Subset
 
 from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     ISICImageDataset,
-    SplitIndices,
-    load_or_create_split_manifest,
+    model_preprocessing,
     repository_root,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
@@ -38,7 +40,18 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
     SiameseNetwork,
     build_model,
 )
-from recognition.Siamese_ISIC2020_Melanoma_47472442.train import score_base, score_siamese
+from recognition.Siamese_ISIC2020_Melanoma_47472442.protocol import (
+    load_protocol_manifest,
+    protocol_identity,
+)
+from recognition.Siamese_ISIC2020_Melanoma_47472442.provenance import (
+    file_sha256,
+)
+from recognition.Siamese_ISIC2020_Melanoma_47472442.train import (
+    classification_metrics,
+    score_base,
+    score_siamese,
+)
 from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     apply_triage_rule,
     load_checkpoint,
@@ -90,7 +103,35 @@ def parse_prediction_args(argv: Sequence[str] | None = None) -> argparse.Namespa
     parser.add_argument(
         "--device", choices=("auto", "cpu", "mps", "cuda"), default="auto"
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--partition",
+        choices=("selection", "calibration", "final"),
+        default="calibration",
+        help="Patient role to score; defaults to calibration.",
+    )
+    parser.add_argument(
+        "--evaluate-final",
+        action="store_true",
+        help="Explicitly authorise final scoring of a frozen checkpoint.",
+    )
+    parser.add_argument(
+        "--evaluation-note",
+        default=None,
+        help="Recorded reason for final scoring after model/configuration choices freeze.",
+    )
+    args = parser.parse_args(argv)
+    if args.partition == "final":
+        if (
+            not args.evaluate_final
+            or not args.evaluation_note
+            or not args.evaluation_note.strip()
+        ):
+            parser.error(
+                "Final evaluation requires --evaluate-final and --evaluation-note"
+            )
+    elif args.evaluate_final or args.evaluation_note is not None:
+        parser.error("Final evaluation flags require --partition final")
+    return args
 
 
 def load_run_for_prediction(
@@ -115,6 +156,8 @@ def load_run_for_prediction(
 
     checkpoint = load_checkpoint(checkpoint_path, map_location=device)
     model_name = _checkpoint_model_name(checkpoint)
+    if checkpoint.get("schema_version") != 2:
+        raise ValueError("Use a checkpoint produced by the current training pipeline")
     model_kwargs = checkpoint.get("model_kwargs", {})
     if not isinstance(model_kwargs, Mapping) or model_kwargs:
         raise ValueError("Only empty model_kwargs are supported by this project")
@@ -138,14 +181,14 @@ def select_failure_cases(
 
     A false negative is a melanoma classified as benign. A false positive is a
     benign lesion classified as melanoma. Remaining places are filled by the
-    cases closest to the frozen validation threshold.
+    cases closest to the frozen decision threshold.
 
     Parameters
     ----------
     predictions : list of Prediction
         Held-out scores paired with the saved decisions.
     decision_rule : mapping of str to float
-        Validation-derived threshold and referral margin.
+        Saved threshold and referral margin.
     maximum_cases : int, default=5
         Maximum number of images shown in the SVG montage.
 
@@ -206,6 +249,7 @@ def create_prediction_figures(
     decision_rule: Mapping[str, float],
     score_label: str,
     output_dir: Path,
+    partition: str,
 ) -> list[Path]:
     """Write score-distribution and selected-case SVG evidence for a run.
 
@@ -214,11 +258,13 @@ def create_prediction_figures(
     predictions : list of Prediction
         All held-out predictions from the reloaded model.
     decision_rule : mapping of str to float
-        Validation-only triage rule saved in the checkpoint.
+        Frozen triage rule saved in the checkpoint.
     score_label : str
         Human-readable description of the model score.
     output_dir : pathlib.Path
         Destination directory for generated SVG figures.
+    partition : str
+        Saved role used to label the score-distribution output.
 
     Returns
     -------
@@ -233,7 +279,7 @@ def create_prediction_figures(
             predictions,
             decision_rule,
             score_label,
-            output_dir / "test_score_distribution.svg",
+            output_dir / f"{partition}_score_distribution.svg",
         ),
         plot_failure_cases(failures, output_dir / "failure_cases.svg"),
     ]
@@ -263,46 +309,113 @@ def _load_metrics(metrics_path: Path, model_name: ModelName) -> dict[str, object
     return metrics
 
 
-def _build_test_subset(
+def _validate_saved_run(
+    checkpoint: Mapping[str, object], metrics: Mapping[str, object], config_path: Path
+) -> None:
+    """Bind a new checkpoint to its saved settings, metrics and calibration rule."""
+
+    with config_path.open(encoding="utf-8") as stream:
+        config: object = json.load(stream)
+    if not isinstance(config, Mapping):
+        raise ValueError("Saved effective_config.json must contain an object")
+    config_hash = file_sha256(config_path)
+    if (
+        checkpoint.get("effective_config_sha256") != config_hash
+        or metrics.get("effective_config_sha256") != config_hash
+    ):
+        raise ValueError("Saved configuration does not match checkpoint and metrics")
+    if (
+        metrics.get("schema_version") != 2
+        or config.get("model") != _checkpoint_model_name(checkpoint)
+        or config.get("seed") != metrics.get("seed")
+    ):
+        raise ValueError("Metrics and checkpoint do not match the saved configuration")
+    if metrics.get("protocol") != checkpoint.get("protocol"):
+        raise ValueError("Protocol identity differs between checkpoint and metrics")
+    if checkpoint.get("preprocessing") != model_preprocessing():
+        raise ValueError("Checkpoint preprocessing is not supported by this loader")
+    scoring = _required_mapping(checkpoint, "scoring", "checkpoint")
+    expected_neighbors = (
+        config.get("neighbors") if config.get("model") == "siamese" else None
+    )
+    if scoring.get("neighbors") != expected_neighbors:
+        raise ValueError("Checkpoint scoring differs from the saved configuration")
+    if (
+        checkpoint.get("decision_rule") != metrics.get("decision_rule")
+        or checkpoint.get("decision_rule_partition") != "calibration"
+        or metrics.get("decision_rule_partition") != "calibration"
+    ):
+        raise ValueError("The decision rule must come from calibration patients")
+    if checkpoint.get("best_epoch") != metrics.get("best_epoch"):
+        raise ValueError("Checkpoint and metrics disagree on the selected epoch")
+
+
+@dataclass(frozen=True)
+class PredictionData:
+    """Deterministic prediction view and the only eligible reference indices."""
+
+    dataset: ISICImageDataset
+    subset: Subset
+    fit_indices: tuple[int, ...]
+    partition: str
+
+
+def build_prediction_data(
     checkpoint: Mapping[str, object],
     images_dir: Path | None,
     metadata_csv: Path | None,
-) -> tuple[ISICImageDataset, Subset, SplitIndices]:
-    """Recreate the exact held-out dataset view recorded by training."""
+    partition: str,
+) -> PredictionData:
+    """Rebuild a saved role, validating fitting membership before scoring.
 
-    preprocessing = _required_mapping(checkpoint, "preprocessing", "checkpoint")
-    image_size = _required_int(preprocessing, "image_size", "preprocessing")
-    color_mode = _required_text(preprocessing, "color_mode", "preprocessing")
-    split_settings = _required_mapping(checkpoint, "split_manifest", "checkpoint")
-    manifest_path = _resolve_manifest_path(
-        _required_text(split_settings, "path", "split manifest")
+    Parameters
+    ----------
+    checkpoint : mapping of str to object
+        Checkpoint metadata from the current training pipeline.
+    images_dir, metadata_csv : pathlib.Path or None
+        Optional relocated inputs; metadata must match the frozen identity.
+    partition : {"selection", "calibration", "final"}
+        Patient role to score using the saved decision rule.
+
+    Returns
+    -------
+    PredictionData
+        Verified prediction subset and fitting-only gallery eligibility.
+    """
+
+    role = partition
+    if role not in ("selection", "calibration", "final"):
+        raise ValueError("Prediction role must be selection, calibration or final")
+    saved_protocol = _required_mapping(checkpoint, "protocol", "checkpoint")
+    manifest = _resolve_manifest_path(
+        _required_text(saved_protocol, "path", "protocol")
     )
-    if not manifest_path.is_file():
-        raise FileNotFoundError(
-            f"Saved split manifest does not exist: {manifest_path}. "
-            "Prediction will not create a replacement split."
-        )
+    preprocessing = _required_mapping(checkpoint, "preprocessing", "checkpoint")
     dataset = ISICImageDataset(
         images_dir=images_dir,
         metadata_csv=metadata_csv,
-        image_size=image_size,
-        color_mode=color_mode,
+        image_size=_required_int(preprocessing, "image_size", "preprocessing"),
+        color_mode=_required_text(preprocessing, "color_mode", "preprocessing"),
         training=False,
     )
-    split_indices = load_or_create_split_manifest(
-        dataset,
-        manifest_path,
-        _required_float(split_settings, "validation_fraction", "split manifest"),
-        _required_float(split_settings, "test_fraction", "split manifest"),
-        _required_int(split_settings, "seed", "split manifest"),
+    indices = load_protocol_manifest(dataset, manifest)
+    if dict(saved_protocol) != protocol_identity(manifest):
+        raise ValueError(
+            "Frozen protocol identity has changed since this run was fitted"
+        )
+    fit_patients = sorted({dataset.samples[index].patient_id for index in indices.fit})
+    if checkpoint.get("fit_patient_ids") != fit_patients:
+        raise ValueError("Checkpoint fitting patients differ from the frozen protocol")
+    chosen_indices: tuple[int, ...] = getattr(indices, role)
+    return PredictionData(
+        dataset, Subset(dataset, list(chosen_indices)), indices.fit, role
     )
-    return dataset, Subset(dataset, list(split_indices.test)), split_indices
 
 
 def _rebuild_siamese_gallery(
     checkpoint: Mapping[str, object],
     dataset: ISICImageDataset,
-    split_indices: SplitIndices,
+    fit_indices: Sequence[int],
 ) -> tuple[Subset, int]:
     """Rebuild the exact train-only gallery and its saved neighbour count."""
 
@@ -322,16 +435,16 @@ def _rebuild_siamese_gallery(
         if index is None:
             raise ValueError(f"Saved gallery image is absent from metadata: {name}")
         gallery_indices.append(index)
-    training_indices = set(split_indices.train)
+    training_indices = set(fit_indices)
     if any(index not in training_indices for index in gallery_indices):
-        raise ValueError("Saved Siamese gallery includes a non-training image")
+        raise ValueError("Saved Siamese gallery includes a non-fitting image")
     scoring = _required_mapping(checkpoint, "scoring", "checkpoint")
     neighbors = _required_int(scoring, "neighbors", "scoring")
     return Subset(dataset, gallery_indices), neighbors
 
 
 def _validated_decision_rule(checkpoint: Mapping[str, object]) -> dict[str, float]:
-    """Return the saved validation-only threshold and referral margin."""
+    """Return the saved threshold and referral margin without recalibrating."""
 
     saved_rule = _required_mapping(checkpoint, "decision_rule", "checkpoint")
     return {
@@ -346,40 +459,38 @@ def _predict_scores(
     model: nn.Module,
     checkpoint: Mapping[str, object],
     dataset: ISICImageDataset,
-    test: Subset,
-    split_indices: SplitIndices,
+    subset: Subset,
+    fit_indices: Sequence[int],
     batch_size: int,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Score the fixed test partition using the checkpoint's frozen context."""
+    """Score the chosen patient role using the checkpoint's frozen context."""
 
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    test_loader = DataLoader(test, batch_size=batch_size)
+    loader = DataLoader(subset, batch_size=batch_size)
     if isinstance(model, BaseCNN):
-        return score_base(model, test_loader, device)
+        return score_base(model, loader, device)
     if isinstance(model, SiameseNetwork):
-        gallery, neighbors = _rebuild_siamese_gallery(
-            checkpoint, dataset, split_indices
-        )
+        gallery, neighbors = _rebuild_siamese_gallery(checkpoint, dataset, fit_indices)
         gallery_loader = DataLoader(gallery, batch_size=batch_size)
-        return score_siamese(model, test_loader, gallery_loader, device, neighbors)
+        return score_siamese(model, loader, gallery_loader, device, neighbors)
     raise TypeError(f"Unsupported checkpoint model: {type(model).__name__}")
 
 
 def _make_predictions(
     dataset: ISICImageDataset,
-    test: Subset,
+    subset: Subset,
     labels: Sequence[int],
     scores: Sequence[float],
     decision_rule: Mapping[str, float],
 ) -> list[Prediction]:
-    """Pair deterministic test metadata with model scores and frozen decisions."""
+    """Pair held-out metadata with model scores and frozen decisions."""
 
-    if len(test.indices) != len(labels) or len(labels) != len(scores):
-        raise ValueError("Test metadata, labels, and scores must have equal lengths")
+    if len(subset.indices) != len(labels) or len(labels) != len(scores):
+        raise ValueError("Metadata, labels, and scores must have equal lengths")
     predictions: list[Prediction] = []
-    for index, label, score in zip(test.indices, labels, scores):
+    for index, label, score in zip(subset.indices, labels, scores):
         numeric_score = float(score)
         if label not in (0, 1) or not isfinite(numeric_score):
             raise ValueError("Prediction labels must be binary and scores finite")
@@ -397,11 +508,13 @@ def _make_predictions(
     return predictions
 
 
-def _write_predictions(path: Path, predictions: Sequence[Prediction]) -> None:
+def _write_predictions(
+    path: Path, predictions: Sequence[Prediction], threshold: float
+) -> None:
     """Write and print one row for every held-out prediction."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = ("image_name", "patient_id", "actual", "score", "decision")
+    columns = ("image_name", "patient_id", "actual", "score", "predicted", "decision")
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(columns)
@@ -412,6 +525,7 @@ def _write_predictions(path: Path, predictions: Sequence[Prediction]) -> None:
                     prediction.patient_id,
                     prediction.actual,
                     prediction.score,
+                    int(prediction.score >= threshold),
                     prediction.decision,
                 )
             )
@@ -424,6 +538,7 @@ def _write_predictions(path: Path, predictions: Sequence[Prediction]) -> None:
                 prediction.patient_id,
                 prediction.actual,
                 prediction.score,
+                int(prediction.score >= threshold),
                 prediction.decision,
             )
         )
@@ -435,9 +550,7 @@ def _required_mapping(
     """Return a named mapping field or raise a schema-specific error."""
 
     value = mapping.get(name)
-    if not isinstance(value, Mapping) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
         raise ValueError(f"{context} needs a mapping field named {name!r}")
     return cast(Mapping[str, object], value)
 
@@ -483,45 +596,96 @@ def _score_label(checkpoint: Mapping[str, object]) -> str:
     """Describe the saved model score without treating it as calibrated by default."""
 
     return (
-        "Melanoma probability"
+        "Melanoma softmax score"
         if _checkpoint_model_name(checkpoint) == "base"
         else "Melanoma similarity score"
     )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Reload a saved run, infer on its held-out partition, and write SVGs."""
+    """Reload a frozen run and explicitly score its permitted patient role."""
 
     args = parse_prediction_args(argv)
     device = select_device(args.device)
     model, checkpoint = load_run_for_prediction(args.checkpoint, device)
     model_name = _checkpoint_model_name(checkpoint)
     metrics_path = args.metrics or args.checkpoint.parent / "metrics.json"
-    _load_metrics(metrics_path, model_name)
-    dataset, test, split_indices = _build_test_subset(
-        checkpoint, args.images_dir, args.metadata_csv
+    metrics = _load_metrics(metrics_path, model_name)
+    _validate_saved_run(
+        checkpoint, metrics, args.checkpoint.parent / "effective_config.json"
+    )
+    data = build_prediction_data(
+        checkpoint, args.images_dir, args.metadata_csv, args.partition
     )
     decision_rule = _validated_decision_rule(checkpoint)
+    output_dir = (
+        args.output_dir or args.checkpoint.parent / "predictions" / data.partition
+    )
+    output_dir.mkdir(parents=True, exist_ok=False)
+    evaluation: dict[str, object] = {
+        "schema_version": 1,
+        "partition": data.partition,
+        "status": "started",
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "checkpoint_sha256": file_sha256(args.checkpoint),
+        "metrics_sha256": file_sha256(metrics_path),
+        "protocol": checkpoint.get("protocol"),
+        "effective_config_sha256": checkpoint.get("effective_config_sha256"),
+        "final_evaluation_authorised": bool(args.evaluate_final),
+        "evaluation_note": args.evaluation_note,
+        "decision_rule": decision_rule,
+        "device": str(device),
+        "batch_size": args.batch_size,
+    }
+    evaluation_path = output_dir / "evaluation.json"
+    _write_evaluation(evaluation_path, evaluation)
     scores, labels = _predict_scores(
         model,
         checkpoint,
-        dataset,
-        test,
-        split_indices,
+        data.dataset,
+        data.subset,
+        data.fit_indices,
         args.batch_size,
         device,
     )
     predictions = _make_predictions(
-        dataset, test, labels.tolist(), scores.tolist(), decision_rule
+        data.dataset, data.subset, labels.tolist(), scores.tolist(), decision_rule
     )
-    output_dir = args.output_dir or args.checkpoint.parent / "predictions"
-    _write_predictions(output_dir / "test_predictions.csv", predictions)
+    prediction_path = output_dir / f"{data.partition}_predictions.csv"
+    _write_predictions(prediction_path, predictions, decision_rule["threshold"])
     figures = create_prediction_figures(
-        predictions, decision_rule, _score_label(checkpoint), output_dir
+        predictions,
+        decision_rule,
+        _score_label(checkpoint),
+        output_dir,
+        data.partition,
     )
-    print(f"Reloaded {model_name} checkpoint on {device}", file=sys.stderr)
+    evaluation.update(
+        {
+            "status": "complete",
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "metrics": classification_metrics(
+                labels, scores, decision_rule["threshold"]
+            ),
+            "prediction_count": len(predictions),
+            "predictions_sha256": file_sha256(prediction_path),
+        }
+    )
+    _write_evaluation(evaluation_path, evaluation)
+    print(
+        f"Reloaded {model_name} on {device}; partition={data.partition}",
+        file=sys.stderr,
+    )
     for figure in figures:
         print(f"Saved {figure}", file=sys.stderr)
+
+
+def _write_evaluation(path: Path, evaluation: Mapping[str, object]) -> None:
+    """Persist the explicit evaluation intent and its eventual result."""
+
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(dict(evaluation), stream, indent=2)
+        stream.write("\n")
 
 
 if __name__ == "__main__":

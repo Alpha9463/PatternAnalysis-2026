@@ -6,8 +6,9 @@ Run from the repository root::
       recognition.Siamese_ISIC2020_Melanoma_47472442.train \
       --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/baseline.yaml
 
-The validation partition chooses the best checkpoint and triage rule. Held-out
-test labels are used only for final evaluation and saved reporting artifacts.
+Selection patients choose the best checkpoint; separate calibration patients
+choose the triage rule. Final patients are scored only by an explicit
+``predict --partition final --evaluate-final`` command after the run is frozen.
 """
 
 import argparse
@@ -15,8 +16,10 @@ import copy
 import csv
 import json
 import random
+import time
 from collections.abc import Callable, Sequence
 from functools import partial
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -31,12 +34,24 @@ from torch import nn
 from torch.nn import functional as functional
 from torch.utils.data import DataLoader, Subset
 
-from recognition.Siamese_ISIC2020_Melanoma_47472442.config import RunConfig, load_run_config
+from recognition.Siamese_ISIC2020_Melanoma_47472442.config import (
+    RunConfig,
+    load_run_config,
+)
 from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     ISICImageDataset,
     SiamesePairDataset,
-    SplitIndices,
-    load_or_create_split_manifest,
+    model_preprocessing,
+)
+from recognition.Siamese_ISIC2020_Melanoma_47472442.protocol import (
+    ProtocolIndices,
+    load_protocol_manifest,
+    partition_summary,
+    protocol_identity,
+)
+from recognition.Siamese_ISIC2020_Melanoma_47472442.provenance import (
+    effective_config,
+    file_sha256,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
     BaseCNN,
@@ -101,7 +116,7 @@ def train_base_epoch(
 def score_base(
     model: BaseCNN, loader: DataLoader, device: torch.device
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return melanoma probabilities and labels from the direct classifier."""
+    """Return melanoma softmax scores and labels from the direct classifier."""
 
     model.eval()
     scores: list[float] = []
@@ -283,13 +298,11 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument("--images-dir", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--metadata-csv", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--output-dir", type=Path, default=argparse.SUPPRESS)
-    parser.add_argument("--split-manifest", type=Path, default=argparse.SUPPRESS)
+    parser.add_argument("--protocol-manifest", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--epochs", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--learning-rate", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--validation-fraction", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--test-fraction", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--target-recall", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--pairs-per-epoch", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--gallery-per-class", type=int, default=argparse.SUPPRESS)
@@ -304,47 +317,80 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     return load_run_config(config_path, parsed)
 
 
-def build_datasets(
-    args: RunConfig,
-) -> tuple[Subset, Subset, Subset, Subset, ISICImageDataset, SplitIndices]:
-    """Create augmented training and deterministic evaluation dataset views."""
+@dataclass(frozen=True)
+class TrainingData:
+    """Dataset views allowed during fitting, selection and calibration.
 
-    evaluation_dataset = ISICImageDataset(
+    Attributes
+    ----------
+    fit, gallery, selection, calibration : torch.utils.data.Subset
+        Fitting uses augmented images; all other views are deterministic.
+    dataset : ISICImageDataset
+        Deterministic metadata/image view shared by reporting and galleries.
+    indices : ProtocolIndices
+        Frozen role membership. Final indices are never made into a loader here.
+    """
+
+    fit: Subset
+    gallery: Subset
+    selection: Subset
+    calibration: Subset
+    dataset: ISICImageDataset
+    indices: ProtocolIndices
+
+
+def build_datasets(args: RunConfig) -> TrainingData:
+    """Load the frozen protocol and create development-only dataset views.
+
+    Parameters
+    ----------
+    args : RunConfig
+        Effective training settings including the existing protocol path.
+
+    Returns
+    -------
+    TrainingData
+        Fitting, gallery, selection and calibration views, without a final loader.
+    """
+
+    if not args.protocol_manifest.is_file():
+        raise FileNotFoundError(
+            f"Frozen protocol not found: {args.protocol_manifest}. "
+            "Create it explicitly with the protocol module before training."
+        )
+    dataset = ISICImageDataset(
         args.images_dir,
         args.metadata_csv,
         image_size=224,
         color_mode="RGB",
         training=False,
     )
-    training_dataset = ISICImageDataset(
+    indices = load_protocol_manifest(dataset, args.protocol_manifest)
+    augmented = ISICImageDataset(
         args.images_dir,
         args.metadata_csv,
         image_size=224,
         color_mode="RGB",
         training=True,
     )
-    split_indices = load_or_create_split_manifest(
-        evaluation_dataset,
-        args.split_manifest,
-        args.validation_fraction,
-        args.test_fraction,
-        args.seed,
+    return TrainingData(
+        fit=Subset(augmented, list(indices.fit)),
+        gallery=Subset(dataset, list(indices.fit)),
+        selection=Subset(dataset, list(indices.selection)),
+        calibration=Subset(dataset, list(indices.calibration)),
+        dataset=dataset,
+        indices=indices,
     )
-    train = Subset(training_dataset, list(split_indices.train))
-    gallery_train = Subset(evaluation_dataset, list(split_indices.train))
-    validation = Subset(evaluation_dataset, list(split_indices.validation))
-    test = Subset(evaluation_dataset, list(split_indices.test))
-    return train, gallery_train, validation, test, evaluation_dataset, split_indices
 
 
 def profile_model(
     model: BaseCNN | SiameseNetwork,
-    validation_loader: DataLoader,
+    selection_loader: DataLoader,
     device: torch.device,
 ) -> dict[str, object]:
     """Return parameter count and fixed-batch model-forward latency."""
 
-    images, _ = next(iter(validation_loader))
+    images, _ = next(iter(selection_loader))
     device_images = to_device(images, device)
     model.eval()
 
@@ -353,7 +399,7 @@ def profile_model(
         "inference_latency_ms": measure_inference_latency_ms(
             partial(model_forward, model, device_images), device
         ),
-        "latency_scope": "model_forward_fixed_validation_batch",
+        "latency_scope": "model_forward_fixed_selection_batch",
         "accelerator_memory_bytes": peak_accelerator_memory_bytes(device),
         "accelerator_memory_kind": (
             "cuda_peak_allocated"
@@ -377,7 +423,7 @@ def model_forward(
 def write_predictions(
     path: Path,
     dataset: ISICImageDataset,
-    test: Subset,
+    subset: Subset,
     labels: np.ndarray,
     scores: np.ndarray,
     decision_rule: dict[str, float],
@@ -389,7 +435,7 @@ def write_predictions(
         writer.writerow(
             ("image_name", "patient_id", "actual", "score", "predicted", "decision")
         )
-        for index, actual, score in zip(test.indices, labels, scores):
+        for index, actual, score in zip(subset.indices, labels, scores):
             sample = dataset.samples[index]
             writer.writerow(
                 (
@@ -404,23 +450,39 @@ def write_predictions(
 
 
 def main() -> None:
-    """Run patient-safe training, validation selection, and held-out evaluation."""
+    """Train on fitting patients, select a checkpoint and calibrate its rule.
 
+    Notes
+    -----
+    This entry point never scores final or development patients.
+    Existing run directories are refused to preserve previous artifacts.
+    """
+
+    started = time.perf_counter()
     args = parse_run_config()
     set_seed(args.seed)
     device = select_device(args.device)
     run_directory = args.output_dir / args.run_name
-    run_directory.mkdir(parents=True, exist_ok=True)
-
-    train, gallery_train, validation, test, dataset, split_indices = build_datasets(args)
+    if run_directory.exists():
+        raise FileExistsError(f"Run directory already exists: {run_directory}")
+    data = build_datasets(args)
+    identity = protocol_identity(args.protocol_manifest)
+    preprocessing = model_preprocessing()
+    config = effective_config(args)
+    run_directory.mkdir(parents=True, exist_ok=False)
+    config_path = run_directory / "effective_config.json"
+    with config_path.open("w", encoding="utf-8") as stream:
+        json.dump(config, stream, indent=2)
+        stream.write("\n")
+    config_hash = file_sha256(config_path)
     print(
-        "Device: "
-        f"{device}; images: train={len(train)}, validation={len(validation)}, "
-        f"test={len(test)}",
+        f"Device: {device}; images: fit={len(data.fit)}, "
+        f"selection={len(data.selection)}, calibration={len(data.calibration)}; "
+        "final evaluation disabled during training",
         flush=True,
     )
-    validation_loader = DataLoader(validation, batch_size=args.batch_size)
-    test_loader = DataLoader(test, batch_size=args.batch_size)
+    selection_loader = DataLoader(data.selection, batch_size=args.batch_size)
+    calibration_loader = DataLoader(data.calibration, batch_size=args.batch_size)
 
     reset_peak_accelerator_memory(device)
     model = build_model(args.model).to(device)
@@ -430,26 +492,26 @@ def main() -> None:
     gallery_image_names: list[str] = []
     if isinstance(model, BaseCNN):
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-        counts = np.bincount(subset_labels(train), minlength=2)
+        counts = np.bincount(subset_labels(data.fit), minlength=2)
         if np.any(counts == 0):
-            raise ValueError("Training split must include both classes")
+            raise ValueError("Fitting partition must include both classes")
         weights = torch.tensor(
-            len(train) / (2 * counts), dtype=torch.float32, device=device
+            len(data.fit) / (2 * counts), dtype=torch.float32, device=device
         )
         criterion = nn.CrossEntropyLoss(weight=weights)
-        train_loader = DataLoader(train, batch_size=args.batch_size, shuffle=True)
+        train_loader = DataLoader(data.fit, batch_size=args.batch_size, shuffle=True)
         train_one_epoch = partial(
             train_base_epoch, model, train_loader, optimizer, criterion, device
         )
         score_images = partial(score_base, model, device=device)
     elif isinstance(model, SiameseNetwork):
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-        pairs = SiamesePairDataset(train, args.pairs_per_epoch, args.seed)
+        pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
         pair_loader = DataLoader(pairs, batch_size=args.batch_size, shuffle=True)
-        gallery = make_gallery(gallery_train, args.gallery_per_class, args.seed)
+        gallery = make_gallery(data.gallery, args.gallery_per_class, args.seed)
         gallery_loader = DataLoader(gallery, batch_size=args.batch_size)
         gallery_image_names = [
-            dataset.samples[index].image_name for index in gallery.indices
+            data.dataset.samples[index].image_name for index in gallery.indices
         ]
         train_one_epoch = partial(
             train_siamese_epoch, model, pair_loader, optimizer, device
@@ -465,98 +527,138 @@ def main() -> None:
         raise TypeError(f"Unsupported model instance: {type(model).__name__}")
 
     best_average_precision = -1.0
+    best_epoch = 0
     best_state: dict[str, torch.Tensor] | None = None
     history: list[dict[str, float]] = []
+    training_seconds = 0.0
+    selection_seconds = 0.0
     for epoch in range(args.epochs):
         if pairs is not None:
             pairs.set_epoch(epoch)
+        phase_started = time.perf_counter()
         loss = train_one_epoch()
-        validation_scores, validation_labels = score_images(validation_loader)
+        epoch_training_seconds = time.perf_counter() - phase_started
+        training_seconds += epoch_training_seconds
+        phase_started = time.perf_counter()
+        selection_scores, selection_labels = score_images(selection_loader)
+        epoch_selection_seconds = time.perf_counter() - phase_started
+        selection_seconds += epoch_selection_seconds
         average_precision = float(
-            average_precision_score(validation_labels, validation_scores)
+            average_precision_score(selection_labels, selection_scores)
         )
         history.append(
             {
                 "epoch": float(epoch + 1),
                 "train_loss": loss,
-                "validation_average_precision": average_precision,
+                "selection_average_precision": average_precision,
+                "training_seconds": epoch_training_seconds,
+                "selection_seconds": epoch_selection_seconds,
             }
         )
         plot_training_history(history, run_directory / "training.svg")
         print(
             f"Epoch {epoch + 1}/{args.epochs}: loss={loss:.4f}, "
-            f"validation AP={average_precision:.4f}",
+            f"selection AP={average_precision:.4f}",
             flush=True,
         )
         if average_precision > best_average_precision:
             best_average_precision = average_precision
+            best_epoch = epoch + 1
             best_state = copy.deepcopy(model.state_dict())
 
     if best_state is None:
         raise RuntimeError("No checkpoint was selected")
     model.load_state_dict(best_state)
-    validation_scores, validation_labels = score_images(validation_loader)
+    phase_started = time.perf_counter()
+    selection_scores, selection_labels = score_images(selection_loader)
+    selection_seconds += time.perf_counter() - phase_started
+    phase_started = time.perf_counter()
+    calibration_scores, calibration_labels = score_images(calibration_loader)
     decision_rule = select_triage_rule(
-        validation_labels, validation_scores, args.target_recall
+        calibration_labels, calibration_scores, args.target_recall
     )
-    test_scores, test_labels = score_images(test_loader)
-    profile = profile_model(model, validation_loader, device)
+    calibration_seconds = time.perf_counter() - phase_started
+    phase_started = time.perf_counter()
+    profile = profile_model(model, selection_loader, device)
+    profiling_seconds = time.perf_counter() - phase_started
+    fit_patient_ids = sorted(
+        {data.dataset.samples[index].patient_id for index in data.indices.fit}
+    )
+    timings = {
+        "training_seconds": training_seconds,
+        "selection_seconds": selection_seconds,
+        "calibration_seconds": calibration_seconds,
+        "profiling_seconds": profiling_seconds,
+        "elapsed_before_save_seconds": time.perf_counter() - started,
+    }
     report: dict[str, object] = {
+        "schema_version": 2,
         "model": args.model,
         "device": str(device),
         "seed": args.seed,
         "run_name": args.run_name,
         "score_kind": (
-            "melanoma_probability"
+            "melanoma_softmax_score"
             if isinstance(model, BaseCNN)
             else "benign_minus_melanoma_distance"
         ),
-        "split": {
-            "manifest_path": str(args.split_manifest),
-            "train_images": len(split_indices.train),
-            "validation_images": len(split_indices.validation),
-            "test_images": len(split_indices.test),
-        },
+        "protocol": identity,
+        "partitions": partition_summary(data.dataset, data.indices),
         "history": history,
+        "history_metric_partition": "selection",
+        "best_epoch": best_epoch,
+        "selection_metric": "melanoma_average_precision",
+        "best_selection_average_precision": best_average_precision,
+        "decision_rule_partition": "calibration",
         "decision_rule": decision_rule,
-        "validation": classification_metrics(
-            validation_labels, validation_scores, decision_rule["threshold"]
+        "selection": classification_metrics(
+            selection_labels, selection_scores, decision_rule["threshold"]
         ),
-        "test": classification_metrics(
-            test_labels, test_scores, decision_rule["threshold"]
+        "calibration": classification_metrics(
+            calibration_labels, calibration_scores, decision_rule["threshold"]
         ),
         "profile": profile,
+        "timings": timings,
+        "effective_config_sha256": config_hash,
+        "final_evaluated": False,
     }
     checkpoint = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_name": args.model,
         "model_kwargs": {},
         "state_dict": cpu_state_dict(model),
-        "preprocessing": {"image_size": 224, "color_mode": "RGB"},
-        "split_manifest": {
-            "path": str(args.split_manifest),
-            "seed": args.seed,
-            "validation_fraction": args.validation_fraction,
-            "test_fraction": args.test_fraction,
-        },
+        "preprocessing": preprocessing,
+        "protocol": identity,
+        "fit_patient_ids": fit_patient_ids,
         "gallery_image_names": gallery_image_names,
         "scoring": {"neighbors": args.neighbors if gallery_image_names else None},
         "decision_rule": decision_rule,
+        "decision_rule_partition": "calibration",
+        "best_epoch": best_epoch,
+        "effective_config_sha256": config_hash,
     }
     save_checkpoint(run_directory / "checkpoint.pt", checkpoint)
     with (run_directory / "metrics.json").open("w", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2)
         stream.write("\n")
     write_predictions(
-        run_directory / "test_predictions.csv",
-        dataset,
-        test,
-        test_labels,
-        test_scores,
+        run_directory / "selection_predictions.csv",
+        data.dataset,
+        data.selection,
+        selection_labels,
+        selection_scores,
         decision_rule,
     )
-    print(json.dumps(report["test"], indent=2))
-    print(f"Saved run artifacts to {run_directory}")
+    write_predictions(
+        run_directory / "calibration_predictions.csv",
+        data.dataset,
+        data.calibration,
+        calibration_labels,
+        calibration_scores,
+        decision_rule,
+    )
+    print(json.dumps(report["calibration"], indent=2))
+    print(f"Saved development artifacts to {run_directory}")
 
 
 if __name__ == "__main__":

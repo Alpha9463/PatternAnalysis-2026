@@ -35,9 +35,9 @@ class RunConfig:
         Ground-truth CSV path. ``None`` uses the loader default.
     output_dir : pathlib.Path
         Directory for checkpoints, metrics, and prediction CSVs.
-    split_manifest : pathlib.Path
-        Patient-level partition shared by baseline and Siamese runs.
-    run_name : str, default="base_seed42"
+    protocol_manifest : pathlib.Path
+        Frozen fitting, selection, calibration and final partitions.
+    run_name : str, default="base_v2_seed42"
         Directory name for one reproducible training run.
     epochs : int, default=5
         Number of training epochs.
@@ -46,13 +46,9 @@ class RunConfig:
     learning_rate : float, default=0.001
         Adam learning rate.
     seed : int, default=42
-        Seed for splitting, pairs, and training.
-    validation_fraction : float, default=0.15
-        Patient fraction reserved for validation.
-    test_fraction : float, default=0.15
-        Patient fraction reserved for final testing.
+        Seed for model initialisation, pair sampling and training.
     target_recall : float, default=0.9
-        Validation target used to choose the melanoma threshold.
+        Calibration target used to choose the melanoma threshold.
     pairs_per_epoch : int, default=4096
         Balanced Siamese training pairs per epoch.
     gallery_per_class : int, default=100
@@ -67,14 +63,12 @@ class RunConfig:
     images_dir: Path | None = None
     metadata_csv: Path | None = None
     output_dir: Path = default_data_dir() / "runs"
-    split_manifest: Path = default_data_dir() / "splits" / "isic_seed42.json"
-    run_name: str = "base_seed42"
+    protocol_manifest: Path = default_data_dir() / "splits" / "isic_protocol.json"
+    run_name: str = "base_v2_seed42"
     epochs: int = 5
     batch_size: int = 16
     learning_rate: float = 1e-3
     seed: int = 42
-    validation_fraction: float = 0.15
-    test_fraction: float = 0.15
     target_recall: float = 0.9
     pairs_per_epoch: int = 4096
     gallery_per_class: int = 100
@@ -100,23 +94,15 @@ class RunConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if not _is_positive_number(self.learning_rate):
             raise ValueError("learning_rate must be positive")
-        for name in ("validation_fraction", "test_fraction"):
-            value = getattr(self, name)
-            if not _is_fraction(value):
-                raise ValueError(f"{name} must be between 0 and 1")
         if not _is_positive_number(self.target_recall) or self.target_recall > 1:
             raise ValueError("target_recall must be between 0 and 1")
-        if self.validation_fraction + self.test_fraction >= 1:
-            raise ValueError(
-                "validation_fraction and test_fraction must sum to less than 1"
-            )
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise ValueError("seed must be an integer")
         if self.images_dir is not None and not isinstance(self.images_dir, Path):
             raise ValueError("images_dir must be a path or null")
         if self.metadata_csv is not None and not isinstance(self.metadata_csv, Path):
             raise ValueError("metadata_csv must be a path or null")
-        for name in ("output_dir", "split_manifest"):
+        for name in ("output_dir", "protocol_manifest"):
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be a path")
         if not isinstance(self.run_name, str) or not self.run_name.strip():
@@ -125,7 +111,7 @@ class RunConfig:
 
 _CONFIG_KEYS = frozenset(field.name for field in fields(RunConfig))
 _PATH_KEYS = frozenset(
-    {"images_dir", "metadata_csv", "output_dir", "split_manifest"}
+    {"images_dir", "metadata_csv", "output_dir", "protocol_manifest"}
 )
 
 
@@ -137,17 +123,6 @@ def _is_positive_number(value: object) -> bool:
         and isinstance(value, (int, float))
         and isfinite(value)
         and value > 0
-    )
-
-
-def _is_fraction(value: object) -> bool:
-    """Return whether a finite integer or float is strictly between zero and one."""
-
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and isfinite(value)
-        and 0 < value < 1
     )
 
 

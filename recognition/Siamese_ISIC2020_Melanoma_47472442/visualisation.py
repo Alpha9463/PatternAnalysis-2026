@@ -1,7 +1,7 @@
 """SVG plotting helpers and offline ROC/PR generation from saved ISIC artifacts.
 
 Run this module with ``--run-dir`` to plot saved prediction scores and the
-validation-derived threshold.
+frozen decision threshold.
 """
 
 import argparse
@@ -65,13 +65,13 @@ class Prediction:
 def plot_training_history(
     history: Sequence[Mapping[str, float]], output_path: Path
 ) -> Path:
-    """Write an SVG showing training loss and validation average precision.
+    """Write an SVG showing training loss and checkpoint-selection performance.
 
     Parameters
     ----------
     history : list of mapping
         Per-epoch records with ``epoch``, ``train_loss``, and
-        ``validation_average_precision`` fields.
+        ``selection_average_precision`` fields.
     output_path : pathlib.Path
         SVG destination. Parent directories are created when needed.
 
@@ -86,15 +86,16 @@ def plot_training_history(
         If history is empty or lacks the required numeric values.
     """
 
+    metric_label = "Selection average precision"
     try:
         epochs = [int(entry["epoch"]) for entry in history]
         losses = [float(entry["train_loss"]) for entry in history]
         average_precision = [
-            float(entry["validation_average_precision"]) for entry in history
+            float(entry["selection_average_precision"]) for entry in history
         ]
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
-            "History needs numeric epoch, train_loss, and validation_average_precision"
+            "History needs numeric epoch, train_loss, and selection_average_precision"
         ) from error
     if not epochs:
         raise ValueError("History must contain at least one epoch")
@@ -110,7 +111,7 @@ def plot_training_history(
         average_precision,
         "o-",
         color="#d62728",
-        label="Validation average precision",
+        label=metric_label,
     )
     loss_axis.set(
         title="Training history",
@@ -118,11 +119,11 @@ def plot_training_history(
         ylabel="Training loss",
         xticks=epochs,
     )
-    average_precision_axis.set_ylabel("Validation average precision")
+    average_precision_axis.set_ylabel(metric_label)
     loss_axis.grid(axis="y", alpha=0.3)
     loss_axis.legend(
         loss_line + average_precision_line,
-        ("Training loss", "Validation average precision"),
+        ("Training loss", metric_label),
     )
     figure.tight_layout()
     figure.savefig(output_path, format="svg", bbox_inches="tight")
@@ -147,7 +148,7 @@ def plot_roc_precision_recall(
         Melanoma ranking scores, with larger values indicating melanoma.
         Signed gallery scores are supported; probabilities are not required.
     threshold : float
-        Frozen validation-derived binary decision threshold. This function
+        Saved decision threshold. This function
         never selects a threshold from the plotted labels.
     output_path : pathlib.Path
         SVG destination. Parent directories are created when needed.
@@ -210,7 +211,7 @@ def plot_roc_precision_recall(
             [point_recall],
             color="#c45c35",
             zorder=3,
-            label="Frozen validation threshold",
+            label="Frozen decision threshold",
         )
         roc_axis.set(
             xlabel="Benign false-positive rate",
@@ -235,7 +236,7 @@ def plot_roc_precision_recall(
                 [true_positives / prediction_count],
                 color="#c45c35",
                 zorder=3,
-                label="Frozen validation threshold",
+                label="Frozen decision threshold",
             )
         else:
             pr_axis.text(
@@ -269,14 +270,19 @@ def plot_roc_precision_recall(
     return output_path
 
 
-def load_roc_artifacts(run_directory: Path) -> tuple[list[int], list[float], float]:
+def load_roc_artifacts(
+    run_directory: Path, predictions_path: Path | None = None
+) -> tuple[list[int], list[float], float]:
     """Read saved scores and the frozen binary threshold from a run.
 
     Parameters
     ----------
     run_directory : pathlib.Path
-        Directory containing ``test_predictions.csv`` with ``actual`` and
-        ``score`` columns, and ``metrics.json`` with ``decision_rule.threshold``.
+        Directory containing ``metrics.json`` with ``decision_rule.threshold``.
+    predictions_path : pathlib.Path or None, default=None
+        CSV with ``actual`` and ``score`` columns. Defaults to the run's
+        ``calibration_predictions.csv``. An explicit path allows plotting any
+        other saved predictions without executing the model.
 
     Returns
     -------
@@ -285,7 +291,7 @@ def load_roc_artifacts(run_directory: Path) -> tuple[list[int], list[float], flo
     scores : list of float
         Corresponding saved melanoma scores.
     threshold : float
-        Frozen validation-derived threshold recorded in the metrics file.
+        Frozen decision threshold recorded in the metrics file.
 
     Raises
     ------
@@ -294,9 +300,14 @@ def load_roc_artifacts(run_directory: Path) -> tuple[list[int], list[float], flo
         or prediction rows cannot be parsed.
     """
 
+    with (run_directory / "metrics.json").open(encoding="utf-8") as stream:
+        report: object = json.load(stream)
+    if not isinstance(report, Mapping):
+        raise ValueError("Metrics JSON must contain an object")
+    if predictions_path is None:
+        predictions_path = run_directory / "calibration_predictions.csv"
     labels: list[int] = []
     scores: list[float] = []
-    predictions_path = run_directory / "test_predictions.csv"
     with predictions_path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
         if not {"actual", "score"}.issubset(reader.fieldnames or []):
@@ -310,10 +321,6 @@ def load_roc_artifacts(run_directory: Path) -> tuple[list[int], list[float], flo
                     f"Invalid prediction values in {predictions_path}, line {line_number}"
                 ) from error
 
-    with (run_directory / "metrics.json").open(encoding="utf-8") as stream:
-        report: object = json.load(stream)
-    if not isinstance(report, Mapping):
-        raise ValueError("Metrics JSON must contain an object")
     decision_rule = report.get("decision_rule")
     if not isinstance(decision_rule, Mapping):
         raise ValueError("Metrics JSON needs a saved decision_rule")
@@ -360,7 +367,7 @@ def plot_prediction_score_distribution(
     predictions : sequence of Prediction
         Held-out scores generated from a reloaded model.
     decision_rule : mapping of str to float
-        Validation-derived ``threshold`` and ``referral_margin`` values.
+        Frozen ``threshold`` and ``referral_margin`` values.
     score_label : str
         Axis label explaining the score's model-specific interpretation.
     output_path : pathlib.Path
@@ -410,10 +417,10 @@ def plot_prediction_score_distribution(
         threshold,
         color="black",
         linestyle="--",
-        label=f"Validation threshold = {threshold:.3f}",
+        label=f"Frozen threshold = {threshold:.3f}",
     )
     axis.set(
-        title="Held-out test score distributions",
+        title="Held-out image score distributions",
         xlabel=score_label,
         ylabel="Density",
     )
@@ -525,19 +532,24 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--run-dir",
         type=Path,
         required=True,
-        help="Run directory containing test_predictions.csv and metrics.json.",
+        help="Run directory containing metrics.json and saved prediction CSVs.",
+    )
+    parser.add_argument(
+        "--predictions",
+        type=Path,
+        help="Saved CSV override; defaults to <run-dir>/calibration_predictions.csv.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help="SVG destination; defaults to <run-dir>/test_roc_pr.svg.",
+        help="SVG destination; defaults to <run-dir>/roc_pr.svg.",
     )
     parser.add_argument(
         "--title", default="Melanoma classification", help="Figure title prefix."
     )
     args = parser.parse_args(argv)
-    labels, scores, threshold = load_roc_artifacts(args.run_dir)
-    output_path = args.output or args.run_dir / "test_roc_pr.svg"
+    labels, scores, threshold = load_roc_artifacts(args.run_dir, args.predictions)
+    output_path = args.output or args.run_dir / "roc_pr.svg"
     saved_path = plot_roc_precision_recall(
         labels, scores, threshold, output_path, args.title
     )

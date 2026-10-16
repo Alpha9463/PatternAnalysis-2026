@@ -4,7 +4,7 @@ Notes
 -----
 Use the training JPEG archive and its GroundTruth_v2 CSV from the ISIC 2020
 challenge. Images are decoded only when ``dataset[index]`` is called. Patient
-IDs remain available in ``dataset.samples`` for ``split_by_patient``.
+IDs remain available in ``dataset.samples`` for patient protocol assignment.
 By default, images and the CSV are found under the repository's ``data``
 directory, regardless of the current working directory.
 
@@ -18,7 +18,6 @@ Create a dataset and read one labelled image::
 
 import argparse
 import csv
-import json
 import random
 from collections import defaultdict
 from dataclasses import dataclass
@@ -32,7 +31,6 @@ from torch.utils.data import Dataset, Subset
 
 
 DEFAULT_METADATA_NAME = "ISIC_2020_Training_GroundTruth_v2.csv"
-_PARTITION_NAMES = ("train", "validation", "test")
 
 
 def repository_root() -> Path:
@@ -45,6 +43,26 @@ def default_data_dir() -> Path:
     """Return the repository-local directory reserved for untracked data."""
 
     return repository_root() / "data"
+
+
+def model_preprocessing() -> dict[str, object]:
+    """Describe the standard image pipeline used by the current models.
+
+    Returns
+    -------
+    dict of str to object
+        Deterministic image representation and fitting-only augmentation.
+    """
+
+    return {
+        "image_size": 224,
+        "color_mode": "RGB",
+        "resize": "bilinear",
+        "scaling": "float32_0_1",
+        "exif_transpose": True,
+        "layout": "CHW",
+        "fitting_augmentation": ["horizontal_flip_0.5", "vertical_flip_0.5"],
+    }
 
 
 @dataclass(frozen=True)
@@ -70,25 +88,6 @@ class ISICSample:
     lesion_id: str | None
     label: int
     path: Path
-
-
-@dataclass(frozen=True)
-class SplitIndices:
-    """Dataset indices for one fixed patient-level train/validation/test split.
-
-    Attributes
-    ----------
-    train : tuple of int
-        Dataset indices assigned to training patients.
-    validation : tuple of int
-        Dataset indices assigned to validation patients.
-    test : tuple of int
-        Dataset indices assigned to held-out test patients.
-    """
-
-    train: tuple[int, ...]
-    validation: tuple[int, ...]
-    test: tuple[int, ...]
 
 
 class ISICImageDataset(Dataset):
@@ -144,9 +143,7 @@ class ISICImageDataset(Dataset):
     ) -> None:
         data_dir = default_data_dir()
         self.images_dir = (
-            Path(images_dir).expanduser()
-            if images_dir is not None
-            else data_dir
+            Path(images_dir).expanduser() if images_dir is not None else data_dir
         )
         if metadata_csv is None:
             matches = sorted(data_dir.rglob(DEFAULT_METADATA_NAME))
@@ -385,277 +382,6 @@ class ISICImageDataset(Dataset):
         if random.random() < 0.5:
             image = ImageOps.flip(image)
         return image
-
-
-def split_by_patient(
-    dataset: ISICImageDataset,
-    validation_fraction: float = 0.15,
-    test_fraction: float = 0.15,
-    seed: int = 42,
-) -> tuple[Subset, Subset, Subset]:
-    """Create reproducible train, validation, and test image subsets.
-
-    Patients are stratified by whether any of their images is melanoma. All
-    images from one patient stay in the same subset.
-
-    Parameters
-    ----------
-    dataset : ISICImageDataset
-        Dataset containing labelled images and patient identifiers.
-    validation_fraction : float, default=0.15
-        Fraction of patients reserved for validation.
-    test_fraction : float, default=0.15
-        Fraction of patients reserved for the final test.
-    seed : int, default=42
-        Seed used to shuffle patient identifiers.
-
-    Returns
-    -------
-    train : torch.utils.data.Subset
-        Images from training patients.
-    validation : torch.utils.data.Subset
-        Images from validation patients.
-    test : torch.utils.data.Subset
-        Images from test patients.
-
-    Raises
-    ------
-    ValueError
-        If fractions are invalid or too few patients exist in either stratum.
-    """
-
-    indices = split_indices_by_patient(
-        dataset, validation_fraction, test_fraction, seed
-    )
-    return (
-        Subset(dataset, list(indices.train)),
-        Subset(dataset, list(indices.validation)),
-        Subset(dataset, list(indices.test)),
-    )
-
-
-def split_indices_by_patient(
-    dataset: ISICImageDataset,
-    validation_fraction: float = 0.15,
-    test_fraction: float = 0.15,
-    seed: int = 42,
-) -> SplitIndices:
-    """Return patient-disjoint indices for a reproducible stratified split.
-
-    Each patient is represented by their highest image label so a patient with
-    any melanoma image belongs to the melanoma stratum. The returned index
-    sets preserve metadata order within each partition.
-
-    Parameters
-    ----------
-    dataset : ISICImageDataset
-        Dataset containing labelled images and patient identifiers.
-    validation_fraction : float, default=0.15
-        Fraction of patients reserved for validation.
-    test_fraction : float, default=0.15
-        Fraction of patients reserved for held-out testing.
-    seed : int, default=42
-        Seed used to shuffle patient identifiers inside each stratum.
-
-    Returns
-    -------
-    SplitIndices
-        Patient-disjoint indices for training, validation, and test data.
-
-    Raises
-    ------
-    ValueError
-        If fractions are invalid or too few patients exist in either stratum.
-    """
-
-    if not 0 < validation_fraction < 1 or not 0 < test_fraction < 1:
-        raise ValueError("Validation and test fractions must be between 0 and 1")
-    if validation_fraction + test_fraction >= 1:
-        raise ValueError("Validation and test fractions must sum to less than 1")
-
-    patient_labels: dict[str, int] = {}
-    for sample in dataset.samples:
-        patient_labels[sample.patient_id] = max(
-            patient_labels.get(sample.patient_id, 0), sample.label
-        )
-
-    rng = random.Random(seed)
-    partition: dict[str, str] = {}
-    for label in (0, 1):
-        patients = sorted(
-            patient_id
-            for patient_id, target in patient_labels.items()
-            if target == label
-        )
-        if len(patients) < 3:
-            raise ValueError(f"At least three patients are needed in stratum {label}")
-        rng.shuffle(patients)
-        n_validation = max(1, round(len(patients) * validation_fraction))
-        n_test = max(1, round(len(patients) * test_fraction))
-        if n_validation + n_test >= len(patients):
-            raise ValueError(f"Fractions leave no training patients in stratum {label}")
-        for patient_id in patients[:n_validation]:
-            partition[patient_id] = "validation"
-        for patient_id in patients[n_validation : n_validation + n_test]:
-            partition[patient_id] = "test"
-        for patient_id in patients[n_validation + n_test :]:
-            partition[patient_id] = "train"
-
-    grouped_indices: dict[str, list[int]] = {
-        name: [] for name in _PARTITION_NAMES
-    }
-    for index, sample in enumerate(dataset.samples):
-        grouped_indices[partition[sample.patient_id]].append(index)
-    return SplitIndices(
-        train=tuple(grouped_indices["train"]),
-        validation=tuple(grouped_indices["validation"]),
-        test=tuple(grouped_indices["test"]),
-    )
-
-
-def load_or_create_split_manifest(
-    dataset: ISICImageDataset,
-    manifest_path: str | Path,
-    validation_fraction: float = 0.15,
-    test_fraction: float = 0.15,
-    seed: int = 42,
-) -> SplitIndices:
-    """Load or create the fixed patient-level split for an experiment family.
-
-    The JSON manifest records image names and patient IDs, not only integer
-    positions. Reloading verifies the metadata still matches before returning
-    current dataset indices, so baseline and Siamese runs use the same split.
-
-    Parameters
-    ----------
-    dataset : ISICImageDataset
-        Dataset whose metadata determines the manifest content.
-    manifest_path : str or pathlib.Path
-        JSON manifest path, normally under the ignored repository ``data``
-        directory.
-    validation_fraction : float, default=0.15
-        Fraction of patients reserved for validation when creating a manifest.
-    test_fraction : float, default=0.15
-        Fraction of patients reserved for test data when creating a manifest.
-    seed : int, default=42
-        Patient-shuffle seed recorded in the manifest.
-
-    Returns
-    -------
-    SplitIndices
-        Validated current dataset indices for the fixed split.
-
-    Raises
-    ------
-    ValueError
-        If the manifest is malformed or no longer matches the metadata.
-    """
-
-    path = Path(manifest_path).expanduser()
-    if path.is_file():
-        return _load_split_manifest(
-            dataset, path, validation_fraction, test_fraction, seed
-        )
-
-    indices = split_indices_by_patient(
-        dataset, validation_fraction, test_fraction, seed
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": 1,
-        "seed": seed,
-        "validation_fraction": validation_fraction,
-        "test_fraction": test_fraction,
-        "partitions": {
-            name: [
-                {
-                    "image_name": dataset.samples[index].image_name,
-                    "patient_id": dataset.samples[index].patient_id,
-                }
-                for index in getattr(indices, name)
-            ]
-            for name in _PARTITION_NAMES
-        },
-    }
-    with path.open("w", encoding="utf-8") as stream:
-        json.dump(payload, stream, indent=2)
-        stream.write("\n")
-    return indices
-
-
-def _load_split_manifest(
-    dataset: ISICImageDataset,
-    path: Path,
-    validation_fraction: float,
-    test_fraction: float,
-    seed: int,
-) -> SplitIndices:
-    """Validate one JSON split manifest and return current dataset indices."""
-
-    with path.open(encoding="utf-8") as stream:
-        payload = json.load(stream)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Split manifest must be a JSON object: {path}")
-    if payload.get("schema_version") != 1:
-        raise ValueError(f"Unsupported split manifest schema: {path}")
-    if payload.get("seed") != seed:
-        raise ValueError(f"Split manifest seed differs from requested seed: {path}")
-    if payload.get("validation_fraction") != validation_fraction:
-        raise ValueError(
-            f"Split manifest validation fraction differs from configuration: {path}"
-        )
-    if payload.get("test_fraction") != test_fraction:
-        raise ValueError(
-            f"Split manifest test fraction differs from configuration: {path}"
-        )
-    partitions = payload.get("partitions")
-    if not isinstance(partitions, dict) or set(partitions) != set(_PARTITION_NAMES):
-        raise ValueError(f"Split manifest needs all partitions: {path}")
-
-    sample_indices = {
-        sample.image_name: index for index, sample in enumerate(dataset.samples)
-    }
-    if len(sample_indices) != len(dataset.samples):
-        raise ValueError("Dataset metadata has duplicate image names")
-    seen_images: set[str] = set()
-    patient_partitions: dict[str, str] = {}
-    grouped_indices: dict[str, list[int]] = {name: [] for name in _PARTITION_NAMES}
-    for name in _PARTITION_NAMES:
-        records = partitions[name]
-        if not isinstance(records, list):
-            raise ValueError(f"Split manifest partition {name!r} must be a list")
-        for record in records:
-            if not isinstance(record, dict):
-                raise ValueError(f"Split manifest record in {name!r} must be an object")
-            image_name = record.get("image_name")
-            patient_id = record.get("patient_id")
-            if not isinstance(image_name, str) or not isinstance(patient_id, str):
-                raise ValueError(f"Split manifest record in {name!r} is incomplete")
-            if image_name in seen_images:
-                raise ValueError(f"Duplicate image in split manifest: {image_name}")
-            index = sample_indices.get(image_name)
-            if index is None:
-                raise ValueError(f"Manifest image is missing from metadata: {image_name}")
-            current_patient_id = dataset.samples[index].patient_id
-            if current_patient_id != patient_id:
-                raise ValueError(
-                    f"Manifest patient differs for {image_name}: "
-                    f"{patient_id!r} != {current_patient_id!r}"
-                )
-            previous_partition = patient_partitions.setdefault(patient_id, name)
-            if previous_partition != name:
-                raise ValueError(
-                    f"Patient {patient_id} appears in multiple manifest partitions"
-                )
-            seen_images.add(image_name)
-            grouped_indices[name].append(index)
-    if seen_images != set(sample_indices):
-        raise ValueError("Split manifest does not cover exactly the current metadata")
-    return SplitIndices(
-        train=tuple(grouped_indices["train"]),
-        validation=tuple(grouped_indices["validation"]),
-        test=tuple(grouped_indices["test"]),
-    )
 
 
 class SiamesePairDataset(Dataset):
