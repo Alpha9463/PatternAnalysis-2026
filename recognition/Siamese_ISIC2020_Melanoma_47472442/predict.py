@@ -33,6 +33,7 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
     MelanomaModel,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.protocol import (
+    ProtocolIndices,
     load_protocol_manifest,
     protocol_identity,
 )
@@ -111,6 +112,15 @@ def parse_prediction_args(argv: Sequence[str] | None = None) -> argparse.Namespa
         help="Recorded reason for final scoring after model/configuration choices freeze.",
     )
     args = parser.parse_args(argv)
+    check_final_evaluation(parser, args)
+    return args
+
+
+def check_final_evaluation(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    """Require explicit authorisation before scoring final patients."""
+
     if args.partition == "final":
         if (
             not args.evaluate_final
@@ -122,13 +132,12 @@ def parse_prediction_args(argv: Sequence[str] | None = None) -> argparse.Namespa
             )
     elif args.evaluate_final or args.evaluation_note is not None:
         parser.error("Final evaluation flags require --partition final")
-    return args
 
 
 def load_run_for_prediction(
     checkpoint_path: Path, device: torch.device
 ) -> tuple[MelanomaModel, dict[str, Any]]:
-    """Load a saved model through the project model factory in evaluation mode.
+    """Load the saved classifier without fetching pretrained weights.
 
     Parameters
     ----------
@@ -262,7 +271,7 @@ def create_prediction_figures(
     ]
 
 
-def _validate_saved_run(
+def validate_saved_run(
     checkpoint: Mapping[str, Any], metrics: Mapping[str, Any], config_path: Path
 ) -> None:
     """Check run identity without revalidating the saved file schemas."""
@@ -287,6 +296,7 @@ class PredictionData:
 
     dataset: ISICImageDataset
     subset: Subset
+    indices: ProtocolIndices
     partition: str
 
 
@@ -325,11 +335,12 @@ def build_prediction_data(
     return PredictionData(
         dataset,
         Subset(dataset, list(getattr(indices, partition))),
+        indices,
         partition,
     )
 
 
-def _make_predictions(
+def make_predictions(
     dataset: ISICImageDataset,
     subset: Subset,
     labels: Sequence[int],
@@ -387,7 +398,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     model_name = checkpoint["model_name"]
     metrics_path = args.metrics or args.checkpoint.parent / "metrics.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-    _validate_saved_run(
+    validate_saved_run(
         checkpoint, metrics, args.checkpoint.parent / "effective_config.json"
     )
     data = build_prediction_data(
@@ -415,11 +426,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         "batch_size": args.batch_size,
     }
     evaluation_path = output_dir / "evaluation.json"
-    _write_evaluation(evaluation_path, evaluation)
+    write_evaluation(evaluation_path, evaluation)
     scores, labels = score_model(
         model, DataLoader(data.subset, batch_size=args.batch_size), device
     )
-    predictions = _make_predictions(
+    predictions = make_predictions(
         data.dataset, data.subset, labels.tolist(), scores.tolist(), decision_rule
     )
     prediction_path = output_dir / f"{data.partition}_predictions.csv"
@@ -442,7 +453,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "predictions_sha256": file_sha256(prediction_path),
         }
     )
-    _write_evaluation(evaluation_path, evaluation)
+    write_evaluation(evaluation_path, evaluation)
     print(
         f"Reloaded {model_name} on {device}; partition={data.partition}",
         file=sys.stderr,
@@ -451,7 +462,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"Saved {figure}", file=sys.stderr)
 
 
-def _write_evaluation(path: Path, evaluation: Mapping[str, Any]) -> None:
+def write_evaluation(path: Path, evaluation: Mapping[str, Any]) -> None:
     """Persist the explicit evaluation intent and its eventual result."""
 
     with path.open("w", encoding="utf-8") as stream:

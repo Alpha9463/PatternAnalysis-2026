@@ -74,6 +74,18 @@ With five epochs and batch size 16 **pairs**, each model receives 8,192 image pr
 
 ImageNet initialisation uses Torchvision's `ResNet18_Weights.IMAGENET1K_V1`; the original ImageNet classifier is replaced by this project's projection and binary head. The provided draft brief's Siamese entry does not require training from scratch or prohibit ImageNet initialisation, but it does not explicitly confirm permission for this task. The implementation proceeds on the interpretation that generic pretrained initialisation is compatible with the required Siamese learning; this is not a recorded teaching-team approval. The weight source is attributed in the references, and `--no-pretrained` supports the same architecture from random initialisation.
 
+### Fitting References and Referral Comparison
+
+The diagnostic pipeline builds a deterministic, class-balanced gallery from fitting patients only. It selects one image per patient per class, up to 100 references per class, limited by the smaller available patient count. The saved training seed determines the image identities. Identical patient protocols and seeds therefore give both objective variants the same reference images. No selection, calibration or final image enters the gallery.
+
+For each query, the pipeline retrieves its five nearest reference embeddings by Euclidean distance. Neighbour disagreement is the fraction of their ground-truth labels opposing the classifier's binary prediction at its saved threshold. Confidence uncertainty is the negative absolute distance from that threshold, so larger values indicate a score closer to the boundary. A balanced gallery's melanoma-label fraction is an agreement statistic, not a probability at natural prevalence. Neither nearest images nor a two-dimensional projection establishes the visual cause of a decision.
+
+Two additional review policies always route classifier-positive images. Among classifier-negative images, the confidence policy prioritises threshold proximity; the reference policy prioritises neighbour disagreement, using threshold proximity to break disagreement ties. Cutoffs are fitted on calibration patients to route at least 95% of melanoma images there, then saved before the requested evaluation population is scored. Every exact boundary tie is routed. The reported calibration recall may therefore exceed the requested target, and unseen recall need not match between policies. Workload comparisons must be interpreted alongside the achieved melanoma capture, rather than assuming equivalent sensitivity.
+
+The evaluation exports both the frozen-policy operating results and descriptive workload/capture curves along the ordered review queues. Evaluation labels measure those curves; they do not choose the deployed cutoffs. Error-detection AUROC and average precision assess whether each raw uncertainty statistic ranks binary classifier errors above correct decisions. Capture means a true melanoma image was sent for review; human diagnostic accuracy is not measured. These policies are reported separately from the checkpoint's existing three-way triage decision.
+
+Failure evidence selects up to five actual binary errors, including false negatives and false positives when available, prioritising confident errors. Each appears beside up to three fitting references with labels, distances and patient identifiers. A PCA map is fitted on fitting-reference embeddings and then applied to queries, with explained variance reported. The map is a projection diagnostic, not proof of separation in the original 128 dimensions. This generation code is implemented but unrun; visual autopsies and any benefit from disagreement remain to be established from completed ResNet runs.
+
 ### Model Selection and Decision Rule
 
 Both historical compact models were trained for five epochs with batch size 16, Adam learning rate 0.001 and seed 42. Selection average precision chose the checkpoint: epoch 1 for the CNN and epoch 4 for the Siamese model. Each checkpoint's binary threshold was then chosen on separate calibration patients to retain at least 90% melanoma recall there.
@@ -92,7 +104,7 @@ The intended user is a reviewer assessing suspicious or ambiguous dermoscopic im
 
 Leakage control requires zero overlapping patients across fitting, selection, calibration and final evaluation, with published duplicates kept together and pairs and reference galleries restricted to fitting patients. Classification requires one melanoma score and image label, with both models evaluated on identical patients using accuracy, per-class precision and recall, macro-F1, AUROC and melanoma PR-AUC. The task brief suggests an accuracy target of approximately 0.80.
 
-Triage thresholds will be frozen using calibration patients, targeting at least 90% melanoma recall there. Evaluation will report melanoma sensitivity, benign false-positive rate, ambiguous referrals and total review workload, with referral rules compared at matched recall. Qualitative evidence will include three to five actual failures with images, scores and training references, alongside an assessment of whether confidence or neighbour disagreement identifies errors.
+Triage thresholds will be frozen using calibration patients, targeting at least 90% melanoma recall there. Evaluation will report melanoma sensitivity, benign false-positive rate, ambiguous referrals and total review workload. Referral rules will use a shared calibration recall target, with achieved recall and workload reported together. Qualitative evidence will include three to five actual failures with images, scores and training references, alongside an assessment of whether confidence or neighbour disagreement identifies errors.
 
 The local resource constraint is a two-hour Apple MPS pilot at batch size 16 and 224 × 224 resolution, with observed process memory capped at 24 GiB. Parameter count, timing scope and accelerator allocation will be recorded, with unavailable exact peak-memory measurements identified. Together, these establish five acceptance criteria covering leakage, classification, triage, failure evidence and local resources.
 
@@ -241,13 +253,13 @@ Only one seed has been run, and the selection and calibration groups contain 41 
 
 Both compact models train and score locally on MPS. The CNN achieved higher selection average precision (0.0628 versus 0.0555), while the Siamese model achieved higher selection AUROC (0.7964 versus 0.7457). At the calibration threshold targeting 90% melanoma recall, precision remained below 4% for both. Their three-way policies routed approximately 55% of calibration images for review while still clearing melanomas incorrectly. The completed comparison therefore establishes working baselines and an unresolved sensitivity–workload trade-off.
 
-The implementation now supports a controlled ResNet-18 comparison of classification alone and joint classification/contrastive learning, with the same architecture, paired-image inputs and optimiser budget. These configurations remain unrun. The next evidence is the author-run pilot comparison, followed by fitting-reference and neighbour-disagreement diagnostics for referral and failure analysis. Selection average precision will guide model choices, with the final population reserved until those choices and the decision policy are frozen.
+The implementation now supports a controlled ResNet-18 comparison of classification alone and joint classification/contrastive learning, with the same architecture, paired-image inputs and optimiser budget. These configurations remain unrun. The fitting-reference and neighbour-disagreement diagnostic pipeline is also implemented but unrun. The next evidence is the author-run pilot comparison and its reference, referral and failure outputs. Selection average precision will guide model choices, with the final population reserved until those choices and the decision policy are frozen.
 
-The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references at matched melanoma sensitivity. Case images, fitting references, workload curves, repeated runs and complete resource measurements are needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
+The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references, using a shared calibration sensitivity target and reporting achieved sensitivity alongside workload. The new diagnostic command can generate case images, fitting references and workload curves. Completed runs, authored failure interpretation, repeated seeds and complete resource measurements are still needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
 
 ## Reproducibility and Usage
 
-The implementation is organised into `modules.py` for model definitions, `dataset.py` for image loading, `train.py` for fitting, checkpoint selection and calibration, and `predict.py` for checkpoint-based inference. `protocol.py` creates, loads and summarises patient roles; `provenance.py` provides configuration serialisation and file hashes. The two YAML configurations now define the unrun ResNet-18 experiments. The code assumes correctly configured local inputs and uses the fixed RGB preprocessing pipeline. Historical compact scores and figures remain available for comparison, but their checkpoints are no longer supported by the current model definitions.
+The implementation is organised into `modules.py` for model definitions, `dataset.py` for image loading, `train.py` for fitting, checkpoint selection and calibration, and `predict.py` for checkpoint-based inference. `protocol.py` creates, loads and summarises patient roles; `provenance.py` provides configuration serialisation and file hashes. `references.py` selects and encodes fitting references, while `diagnostics.py` assembles their evidence and compares calibration-derived referral policies. The two YAML configurations now define the unrun ResNet-18 experiments. The code assumes correctly configured local inputs and uses the fixed RGB preprocessing pipeline. Historical compact scores and figures remain available for comparison, but their checkpoints are no longer supported by the current model definitions.
 
 ### Environment
 
@@ -344,6 +356,53 @@ The reported compact comparison uses its saved CSVs. The prediction commands abo
 
 Prediction prints and saves image identifiers, ground-truth labels, scores, binary predictions and triage decisions. Both objectives use the softmax melanoma score from the saved classifier on the normalised embedding. Pair labels, neighbour voting and gallery scores do not enter this image-level inference path. The score remains a ranking measure; class-balanced training does not establish probability calibration at natural melanoma prevalence.
 
+### Reference and Referral Diagnostics
+
+After completing each ResNet run, the following explicit commands generate selection evidence. They execute checkpoint inference, not training. Diagnostics are not launched automatically by `train.py` or `predict.py`.
+
+```bash
+python -m recognition.Siamese_ISIC2020_Melanoma_47472442.diagnostics \
+  --checkpoint data/runs/resnet18_baseline_seed42/checkpoint.pt \
+  --partition selection
+```
+
+```bash
+python -m recognition.Siamese_ISIC2020_Melanoma_47472442.diagnostics \
+  --checkpoint data/runs/resnet18_siamese_seed42/checkpoint.pt \
+  --partition selection
+```
+
+Outputs are stored under `data/runs/<run-name>/diagnostics/<partition>/`; existing directories are refused. Diagnostic settings use CLI options: `--references-per-class 100`, `--neighbors 5`, `--target-recall 0.95`, `--max-cases 5`, `--batch-size 16` and `--device auto`. These evaluation choices remain outside the training YAML files. Gallery encoding, calibration analysis, query analysis and total elapsed time are recorded separately. Calibration encodings are reused when `--partition calibration` is selected.
+
+| Artifact | Purpose |
+| --- | --- |
+| `evaluation.json` | Checkpoint/configuration/protocol identity, diagnostic settings, frozen calibration cutoffs, achieved review metrics, error-detection metrics and timings |
+| `gallery.csv` | Actual fitting-reference image IDs, patients and labels |
+| `neighbors.csv` | Each query's ordered reference IDs, patients, labels and distances |
+| `query_diagnostics.csv` | Classifier score, original triage decision, uncertainty statistics and both additional review decisions |
+| `referral_curves.csv` | Descriptive review-fraction and melanoma-capture coordinates for each queue |
+| `embeddings.npz` | Reference/query embeddings, labels and image IDs for offline plotting |
+| `failure_references.svg` | Up to five actual binary errors with their nearest fitting references; omitted if there are no errors |
+| `referral_workload.svg`, `embeddings.svg` | Workload/capture curves and the fitting-reference PCA projection |
+
+`query_diagnostics.csv` keeps the checkpoint's original three-way `decision` alongside the separate binary `confidence_review` and `reference_review` indicators. The new comparison does not overwrite the checkpoint policy. Calibration results describe policy-fitting data; selection results remain model-development evidence. Final diagnostics require `--partition final --evaluate-final --evaluation-note "..."` after all model, gallery and referral settings are frozen. The authorisation and calibration-derived cutoffs are recorded before final scoring. Final curves describe the frozen experiment and must not be used to retune its operating point.
+
+Plot generation lives in `visualisation.py`. For example, a saved embedding map can be regenerated without loading a checkpoint or decoding images:
+
+```python
+from pathlib import Path
+import numpy as np
+from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import plot_embedding_map
+
+folder = Path("data/runs/resnet18_siamese_seed42/diagnostics/selection")
+with np.load(folder / "embeddings.npz") as evidence:
+    plot_embedding_map(
+        evidence["reference_embeddings"], evidence["reference_labels"],
+        evidence["query_embeddings"], evidence["query_labels"],
+        folder / "embeddings.svg", "selection",
+    )
+```
+
 ### Saved-Score Visualisation
 
 The ROC and precision–recall figure can be regenerated independently from saved prediction CSVs and `metrics.json`. `visualisation.py` defaults to `calibration_predictions.csv`; `--predictions` selects any other saved CSV. It reads image labels and scores, calculates the curves and marks the frozen threshold stored in the metrics file. This offline command does not load a checkpoint or execute training or inference.
@@ -381,7 +440,7 @@ for run, prefix in (("baseline_seed42", "cnn"), ("siamese_seed42", "siamese")):
 
 ## Artificial Intelligence Usage Disclosure
 
-OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations remain unrun; implementation verification used static checks without model construction, training or inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
+OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, reference/referral diagnostics, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations and reference/referral diagnostics remain unrun; implementation verification used static checks without model construction, training or inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
 
 ## References and Image Attribution
 

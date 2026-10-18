@@ -4,6 +4,8 @@ Run this module with ``--run-dir`` to plot saved prediction scores and the
 frozen decision threshold.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -13,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import ceil, isfinite
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplotlib"))
 
@@ -25,12 +28,17 @@ import numpy as np
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
 from PIL import Image, ImageOps
+from sklearn.decomposition import PCA
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     roc_auc_score,
     roc_curve,
 )
+
+if TYPE_CHECKING:
+    from .dataset import ISICSample
+    from .references import NeighborScores
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,6 +476,215 @@ def plot_failure_cases(predictions: Sequence[Prediction], output_path: Path) -> 
     return output_path
 
 
+def plot_reference_cases(
+    predictions: Sequence[Prediction],
+    gallery: Sequence[ISICSample],
+    neighbors: NeighborScores,
+    selected: Sequence[int],
+    output_path: Path,
+    threshold: float,
+) -> Path:
+    """Show each query with up to three nearest fitting references in an SVG.
+
+    Parameters
+    ----------
+    predictions : sequence of Prediction
+        Query predictions in the same order as the neighbour arrays.
+    gallery : sequence of ISICSample
+        Fitting metadata in reference-index order.
+    neighbors : NeighborScores
+        Nearest-reference indices, distances and agreement statistics.
+    selected : sequence of int
+        Nonempty list of query positions chosen for the montage.
+    output_path : pathlib.Path
+        SVG destination; parent directories are created when needed.
+    threshold : float
+        Frozen binary classifier threshold, separate from the triage band.
+
+    Returns
+    -------
+    pathlib.Path
+        Written SVG path. Neighbour votes are labelled as diagnostic fractions,
+        rather than probabilities or causal explanations.
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    columns = 1 + min(3, neighbors.indices.shape[1])
+    figure, axes = plt.subplots(
+        len(selected),
+        columns,
+        figsize=(3.7 * columns, 4.5 * len(selected)),
+        squeeze=False,
+    )
+    for row, index in zip(axes, selected):
+        prediction = predictions[index]
+        classifier_label = "melanoma" if prediction.score >= threshold else "benign"
+        row[0].imshow(_load_preview_image(prediction.image_path))
+        row[0].set_title(
+            f"Query · {_prediction_title(prediction)}\n"
+            f"classifier={classifier_label}; threshold={threshold:.3f}\n"
+            f"patient={prediction.patient_id}\n"
+            f"neighbour disagreement={neighbors.disagreement[index]:.1%}\n"
+            f"melanoma labels={neighbors.melanoma_fraction[index]:.1%}",
+            fontsize=8,
+        )
+        for axis, reference_index, distance in zip(
+            row[1:], neighbors.indices[index, :3], neighbors.distances[index, :3]
+        ):
+            reference = gallery[int(reference_index)]
+            actual = "melanoma" if reference.label == 1 else "benign"
+            axis.imshow(_load_preview_image(reference.path))
+            axis.set_title(
+                f"Fitting reference · {reference.image_name}\n"
+                f"actual={actual}; distance={distance:.3f}\n"
+                f"patient={reference.patient_id}",
+                fontsize=8,
+            )
+        for axis in row:
+            axis.axis("off")
+    figure.suptitle("Query decisions and nearest fitting references", fontsize=14)
+    _save_svg(
+        figure,
+        output_path,
+        description=(
+            "References are fitting images only. Neighbour agreement is a "
+            "diagnostic, not a probability or causal explanation."
+        ),
+    )
+    return output_path
+
+
+def plot_referral_workload(
+    curves: Mapping[str, Mapping[str, Sequence[float]]],
+    output_path: Path,
+    partition: str,
+) -> Path:
+    """Plot descriptive review workload and melanoma capture for an image role.
+
+    Parameters
+    ----------
+    curves : mapping of str to mapping
+        Named review queues containing ascending ``review_fraction`` values and
+        their corresponding ``melanoma_recall`` values.
+    output_path : pathlib.Path
+        SVG destination; parent directories are created when needed.
+    partition : str
+        Patient role displayed in the title, such as selection or calibration.
+
+    Returns
+    -------
+    pathlib.Path
+        Written SVG path. These diagnostic curves do not select policy cutoffs.
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(7.5, 5.1))
+    for name, curve in curves.items():
+        axis.step(
+            curve["review_fraction"],
+            curve["melanoma_recall"],
+            where="post",
+            label=name.replace("_", " ").capitalize(),
+        )
+    axis.set(
+        title=f"Review workload · {partition} diagnostic",
+        xlabel="Fraction of images routed for review",
+        ylabel="Fraction of melanomas routed for review (recall)",
+        xlim=(0, 1),
+        ylim=(0, 1.02),
+    )
+    axis.legend(loc="lower right")
+    axis.grid(alpha=0.2)
+    axis.spines[["top", "right"]].set_visible(False)
+    _save_svg(
+        figure,
+        output_path,
+        description=(
+            "Descriptive workload and melanoma capture on the named patient "
+            "role. Deployment cutoffs are chosen separately on calibration patients."
+        ),
+    )
+    return output_path
+
+
+def plot_embedding_map(
+    reference_embeddings: np.ndarray,
+    reference_labels: np.ndarray,
+    query_embeddings: np.ndarray,
+    query_labels: np.ndarray,
+    output_path: Path,
+    partition: str,
+) -> Path:
+    """Project fitting references and queries into a fitting-only PCA space.
+
+    Parameters
+    ----------
+    reference_embeddings, query_embeddings : numpy.ndarray
+        Embedding matrices with one image per row and matching feature widths.
+    reference_labels, query_labels : numpy.ndarray
+        Corresponding binary labels: benign (0) or melanoma (1).
+    output_path : pathlib.Path
+        SVG destination; parent directories are created when needed.
+    partition : str
+        Query patient role displayed in the title and legend.
+
+    Returns
+    -------
+    pathlib.Path
+        Written SVG path. PCA is fitted on references only; query labels affect
+        plotting colours without changing the fitted projection.
+    """
+
+    projection = PCA(n_components=2, svd_solver="full")
+    references = projection.fit_transform(reference_embeddings)
+    queries = projection.transform(query_embeddings)
+    variance = projection.explained_variance_ratio_
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(8.0, 5.9))
+    for label, name, color in (
+        (0, "benign", "#1f77b4"),
+        (1, "melanoma", "#c45c35"),
+    ):
+        reference_points = references[reference_labels == label]
+        query_points = queries[query_labels == label]
+        axis.scatter(
+            reference_points[:, 0],
+            reference_points[:, 1],
+            s=42,
+            marker="o",
+            facecolors="none",
+            edgecolors=color,
+            alpha=0.7,
+            label=f"Fitting references · {name}",
+        )
+        axis.scatter(
+            query_points[:, 0],
+            query_points[:, 1],
+            s=20,
+            marker="x",
+            color=color,
+            alpha=0.4,
+            label=f"{partition.capitalize()} queries · {name}",
+        )
+    axis.set(
+        title=f"Embedding geometry · {partition} diagnostic",
+        xlabel=f"PC1 ({variance[0]:.1%} of fitting-reference variance)",
+        ylabel=f"PC2 ({variance[1]:.1%} of fitting-reference variance)",
+    )
+    axis.legend(fontsize=8)
+    axis.grid(alpha=0.15)
+    axis.spines[["top", "right"]].set_visible(False)
+    _save_svg(
+        figure,
+        output_path,
+        description=(
+            "PCA fitted on fitting references only and then applied to query "
+            "embeddings. Two-dimensional geometry does not establish classifier quality."
+        ),
+    )
+    return output_path
+
+
 def _decision_bounds(decision_rule: Mapping[str, float]) -> tuple[float, float]:
     """Return finite threshold and referral margin from a saved rule."""
 
@@ -484,11 +701,13 @@ def _decision_bounds(decision_rule: Mapping[str, float]) -> tuple[float, float]:
 
 
 def _load_preview_image(path: Path) -> Image.Image:
-    """Decode one source lesion image for inclusion in an SVG montage."""
+    """Decode a lesion preview bounded to 768 pixels per side for an SVG."""
 
     try:
         with Image.open(path) as source:
-            return ImageOps.exif_transpose(source).convert("RGB").copy()
+            preview = ImageOps.exif_transpose(source).convert("RGB")
+            preview.thumbnail((768, 768), Image.Resampling.LANCZOS)
+            return preview
     except OSError as error:
         raise OSError(f"Could not decode JPEG for visualisation: {path}") from error
 
