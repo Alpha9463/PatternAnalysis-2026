@@ -31,7 +31,13 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.references import (
     select_gallery,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.train import classification_metrics
-from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import select_device
+from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
+    count_parameters,
+    memory_usage,
+    reset_peak_accelerator_memory,
+    select_device,
+    synchronised_time,
+)
 from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
     Prediction,
     plot_embedding_map,
@@ -216,6 +222,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_diagnostic_args(argv)
     started = time.perf_counter()
     device = select_device(args.device)
+    reset_peak_accelerator_memory(device)
     model, checkpoint = load_run_for_prediction(args.checkpoint, device)
     run_dir = args.checkpoint.parent
     config_path = run_dir / "effective_config.json"
@@ -260,9 +267,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     write_evaluation(report_path, report)
 
     print(f"Encoding {len(gallery)} fitting references", flush=True)
-    phase_started = time.perf_counter()
+    phase_started = synchronised_time(device)
     _, reference_embeddings = encode_images(model, gallery, args.batch_size, device)
-    reference_seconds = time.perf_counter() - phase_started
+    reference_seconds = synchronised_time(device) - phase_started
     gallery_path = output_dir / "gallery.csv"
     write_csv(
         gallery_path,
@@ -277,11 +284,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     print("Scoring calibration patients and freezing referral cutoffs", flush=True)
-    phase_started = time.perf_counter()
+    phase_started = synchronised_time(device)
     calibration = Subset(data.dataset, list(data.indices.calibration))
     calibration_scores, calibration_embeddings = encode_images(
         model, calibration, args.batch_size, device
     )
+    calibration_encoding_seconds = synchronised_time(device) - phase_started
+    neighbor_started = time.perf_counter()
     calibration_neighbors = score_neighbors(
         calibration_embeddings,
         calibration_scores,
@@ -290,6 +299,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         threshold,
         neighbors,
     )
+    calibration_neighbor_seconds = time.perf_counter() - neighbor_started
     calibration_labels = np.asarray(
         [data.dataset.samples[index].label for index in calibration.indices],
         dtype=np.int64,
@@ -319,7 +329,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     write_evaluation(report_path, report)
 
-    phase_started = time.perf_counter()
+    query_encoding_seconds = query_neighbor_seconds = 0.0
     if args.partition == "calibration":
         scores, embeddings, query_neighbors = (
             calibration_scores,
@@ -328,7 +338,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     else:
         print(f"Scoring {args.partition} patients with frozen policies", flush=True)
+        phase_started = synchronised_time(device)
         scores, embeddings = encode_images(model, data.subset, args.batch_size, device)
+        query_encoding_seconds = synchronised_time(device) - phase_started
+        neighbor_started = time.perf_counter()
         query_neighbors = score_neighbors(
             embeddings,
             scores,
@@ -337,7 +350,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             threshold,
             neighbors,
         )
-    query_seconds = time.perf_counter() - phase_started
+        query_neighbor_seconds = time.perf_counter() - neighbor_started
+    query_seconds = query_encoding_seconds + query_neighbor_seconds
     labels = np.asarray(
         [data.dataset.samples[index].label for index in data.subset.indices],
         dtype=np.int64,
@@ -439,9 +453,27 @@ def main(argv: Sequence[str] | None = None) -> None:
             "failure_cases": [predictions[index].image_name for index in failures],
             "timings": {
                 "reference_encoding_seconds": reference_seconds,
+                "calibration_encoding_seconds": calibration_encoding_seconds,
+                "calibration_neighbor_seconds": calibration_neighbor_seconds,
                 "calibration_seconds": calibration_seconds,
+                "query_encoding_seconds": query_encoding_seconds,
+                "query_neighbor_seconds": query_neighbor_seconds,
                 "query_seconds": query_seconds,
                 "total_seconds": time.perf_counter() - started,
+            },
+            "profile": {
+                "parameter_count": count_parameters(model),
+                "reference_images_encoded": len(gallery),
+                "calibration_images_encoded": len(calibration),
+                "query_reuses_calibration": args.partition == "calibration",
+                "query_images_encoded": 0
+                if args.partition == "calibration"
+                else len(predictions),
+                "query_images_per_second": len(predictions) / query_seconds
+                if args.partition != "calibration"
+                else None,
+                "query_scope": "image_loading_preprocessing_transfers_forward_softmax_cpu_embeddings_and_neighbors",
+                **memory_usage(device),
             },
         }
     )

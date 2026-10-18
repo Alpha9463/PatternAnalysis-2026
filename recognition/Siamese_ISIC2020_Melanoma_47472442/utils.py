@@ -1,6 +1,8 @@
 """Runtime, artifact, profiling, and triage helpers for ISIC experiments."""
 
 import random
+import resource
+import sys
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -124,22 +126,40 @@ def apply_triage_rule(score: float, rule: Mapping[str, float]) -> str:
 
 
 def reset_peak_accelerator_memory(device: torch.device) -> None:
-    """Reset available accelerator-memory counters before one profile measurement."""
+    """Reset CUDA peak allocation before a command; MPS has no peak counter."""
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    elif device.type == "mps":
-        torch.mps.empty_cache()
 
 
-def peak_accelerator_memory_bytes(device: torch.device) -> int | None:
-    """Return peak CUDA allocation or current MPS allocation, if available."""
+def memory_usage(device: torch.device) -> dict[str, int | None]:
+    """Read process peak RSS and distinct current/peak tensor allocations.
 
+    Parameters
+    ----------
+    device : torch.device
+        Device used by this command.
+
+    Returns
+    -------
+    dict of str to int or None
+        Byte counts. RSS is the process lifetime high-water mark. CUDA peak
+        starts at the last reset; MPS exposes current tensor allocation only.
+        Accelerator counts exclude allocator caches and must not be added to RSS.
+    """
+
+    current = peak = None
     if device.type == "cuda":
-        return int(torch.cuda.max_memory_allocated(device))
-    if device.type == "mps":
-        return int(torch.mps.current_allocated_memory())
-    return None
+        current = int(torch.cuda.memory_allocated(device))
+        peak = int(torch.cuda.max_memory_allocated(device))
+    elif device.type == "mps":
+        current = int(torch.mps.current_allocated_memory())
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return {
+        "process_peak_rss_bytes": int(rss) * (1 if sys.platform == "darwin" else 1024),
+        "accelerator_current_allocated_bytes": current,
+        "accelerator_peak_allocated_bytes": peak,
+    }
 
 
 def measure_inference_latency_ms(
@@ -152,18 +172,17 @@ def measure_inference_latency_ms(
 
     for _ in range(warmup_iterations):
         inference()
-    _synchronise(device)
-    start = time.perf_counter()
+    start = synchronised_time(device)
     for _ in range(repetitions):
         inference()
-    _synchronise(device)
-    return (time.perf_counter() - start) * 1000 / repetitions
+    return (synchronised_time(device) - start) * 1000 / repetitions
 
 
-def _synchronise(device: torch.device) -> None:
-    """Wait for queued work on an accelerator before timing or profiling."""
+def synchronised_time(device: torch.device) -> float:
+    """Return monotonic seconds after queued accelerator work completes."""
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elif device.type == "mps":
         torch.mps.synchronize()
+    return time.perf_counter()

@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
@@ -46,8 +47,12 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.train import (
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     apply_triage_rule,
+    count_parameters,
     load_checkpoint,
+    memory_usage,
+    reset_peak_accelerator_memory,
     select_device,
+    synchronised_time,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
     Prediction,
@@ -154,7 +159,7 @@ def load_run_for_prediction(
         Saved checkpoint contents.
     """
 
-    checkpoint = load_checkpoint(checkpoint_path, map_location=device)
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     model = MelanomaModel(pretrained=False)
     model.load_state_dict(checkpoint["state_dict"])
     return model.to(device).eval(), checkpoint
@@ -393,7 +398,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Reload a frozen run and explicitly score its permitted patient role."""
 
     args = parse_prediction_args(argv)
+    started = time.perf_counter()
     device = select_device(args.device)
+    reset_peak_accelerator_memory(device)
     model, checkpoint = load_run_for_prediction(args.checkpoint, device)
     model_name = checkpoint["model_name"]
     metrics_path = args.metrics or args.checkpoint.parent / "metrics.json"
@@ -427,9 +434,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
     evaluation_path = output_dir / "evaluation.json"
     write_evaluation(evaluation_path, evaluation)
+    phase_started = synchronised_time(device)
     scores, labels = score_model(
         model, DataLoader(data.subset, batch_size=args.batch_size), device
     )
+    scoring_seconds = synchronised_time(device) - phase_started
     predictions = make_predictions(
         data.dataset, data.subset, labels.tolist(), scores.tolist(), decision_rule
     )
@@ -451,6 +460,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             ),
             "prediction_count": len(predictions),
             "predictions_sha256": file_sha256(prediction_path),
+            "timings": {
+                "scoring_seconds": scoring_seconds,
+                "total_seconds": time.perf_counter() - started,
+            },
+            "profile": {
+                "parameter_count": count_parameters(model),
+                "scoring_images_per_second": len(predictions) / scoring_seconds,
+                "scoring_scope": "image_loading_preprocessing_transfers_forward_softmax_cpu_scores",
+                **memory_usage(device),
+            },
         }
     )
     write_evaluation(evaluation_path, evaluation)

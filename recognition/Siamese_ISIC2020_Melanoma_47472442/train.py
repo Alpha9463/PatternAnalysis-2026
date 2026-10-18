@@ -60,12 +60,13 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     cpu_state_dict,
     count_parameters,
     measure_inference_latency_ms,
-    peak_accelerator_memory_bytes,
+    memory_usage,
     reset_peak_accelerator_memory,
     save_checkpoint,
     select_device,
     select_triage_rule,
     set_seed,
+    synchronised_time,
     to_cpu,
     to_device,
 )
@@ -281,7 +282,7 @@ def profile_model(
     selection_loader: DataLoader,
     device: torch.device,
 ) -> dict[str, object]:
-    """Return parameter count and fixed-batch model-forward latency."""
+    """Measure a preloaded batch forward, excluding loading and transfers."""
 
     images, _ = next(iter(selection_loader))
     device_images = to_device(images, device)
@@ -290,15 +291,12 @@ def profile_model(
     return {
         "parameter_count": count_parameters(model),
         "inference_latency_ms": measure_inference_latency_ms(
-            partial(model, device_images), device
+            partial(model, device_images), device, warmup_iterations=3, repetitions=10
         ),
-        "latency_scope": "classifier_and_embedding_forward_fixed_selection_batch",
-        "accelerator_memory_bytes": peak_accelerator_memory_bytes(device),
-        "accelerator_memory_kind": (
-            "cuda_peak_allocated"
-            if device.type == "cuda"
-            else ("mps_current_allocated" if device.type == "mps" else None)
-        ),
+        "latency_batch_images": len(images),
+        "latency_warmup_batches": 3,
+        "latency_measured_batches": 10,
+        "latency_scope": "preloaded_device_batch_classifier_and_embedding_forward",
     }
 
 
@@ -389,7 +387,7 @@ def main() -> None:
     selection_seconds = 0.0
     for epoch in range(args.epochs):
         pairs.set_epoch(epoch)
-        phase_started = time.perf_counter()
+        phase_started = synchronised_time(device)
         losses = train_epoch(
             model,
             train_loader,
@@ -398,13 +396,13 @@ def main() -> None:
             contrastive_weight,
             args.contrastive_margin,
         )
-        epoch_training_seconds = time.perf_counter() - phase_started
+        epoch_training_seconds = synchronised_time(device) - phase_started
         training_seconds += epoch_training_seconds
-        phase_started = time.perf_counter()
+        phase_started = synchronised_time(device)
         selection_scores, selection_labels = score_model(
             model, selection_loader, device
         )
-        epoch_selection_seconds = time.perf_counter() - phase_started
+        epoch_selection_seconds = synchronised_time(device) - phase_started
         selection_seconds += epoch_selection_seconds
         average_precision = float(
             average_precision_score(selection_labels, selection_scores)
@@ -432,20 +430,20 @@ def main() -> None:
             best_state = copy.deepcopy(model.state_dict())
 
     model.load_state_dict(best_state)
-    phase_started = time.perf_counter()
+    phase_started = synchronised_time(device)
     selection_scores, selection_labels = score_model(model, selection_loader, device)
-    selection_seconds += time.perf_counter() - phase_started
-    phase_started = time.perf_counter()
+    selection_seconds += synchronised_time(device) - phase_started
+    phase_started = synchronised_time(device)
     calibration_scores, calibration_labels = score_model(
         model, calibration_loader, device
     )
     decision_rule = select_triage_rule(
         calibration_labels, calibration_scores, args.target_recall
     )
-    calibration_seconds = time.perf_counter() - phase_started
-    phase_started = time.perf_counter()
+    calibration_seconds = synchronised_time(device) - phase_started
+    phase_started = synchronised_time(device)
     profile = profile_model(model, selection_loader, device)
-    profiling_seconds = time.perf_counter() - phase_started
+    profiling_seconds = synchronised_time(device) - phase_started
     fit_patient_ids = sorted(
         {data.dataset.samples[index].patient_id for index in data.indices.fit}
     )
@@ -454,7 +452,6 @@ def main() -> None:
         "selection_seconds": selection_seconds,
         "calibration_seconds": calibration_seconds,
         "profiling_seconds": profiling_seconds,
-        "elapsed_before_save_seconds": time.perf_counter() - started,
     }
     report: dict[str, object] = {
         "model": args.model,
@@ -507,9 +504,6 @@ def main() -> None:
         "effective_config_sha256": config_hash,
     }
     save_checkpoint(run_directory / "checkpoint.pt", checkpoint)
-    with (run_directory / "metrics.json").open("w", encoding="utf-8") as stream:
-        json.dump(report, stream, indent=2)
-        stream.write("\n")
     write_predictions(
         run_directory / "selection_predictions.csv",
         data.dataset,
@@ -526,6 +520,11 @@ def main() -> None:
         calibration_scores,
         decision_rule,
     )
+    profile.update(memory_usage(device))
+    timings["total_seconds"] = time.perf_counter() - started
+    with (run_directory / "metrics.json").open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+        stream.write("\n")
     print(json.dumps(report["calibration"], indent=2))
     print(f"Saved development artifacts to {run_directory}")
 

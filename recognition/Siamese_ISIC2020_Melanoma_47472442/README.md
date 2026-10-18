@@ -234,6 +234,8 @@ The shorter Siamese run is specific to this experiment's smaller model and train
 
 Forward latency measures the classifier forward pass for the CNN and the single-image encoder for the Siamese model. It excludes image decoding, transfers, softmax or gallery-distance scoring, and report generation. The selection and calibration scoring phases include their data-loading and scoring work; Siamese scoring also rebuilds the gallery embeddings for each scoring call. Current MPS allocation is not peak accelerator memory or total process memory. Both recorded run durations fall below the two-hour pilot budget, while compliance with the 24 GiB process-memory criterion cannot be assessed from the saved measurements.
 
+The current ResNet pipeline adds process peak RSS, synchronized phase timing and complete image-scoring throughput. Diagnostic timing separates reference encoding, calibration and query retrieval so the cost of reference evidence can be assessed alongside the classifier. This instrumentation remains unrun; it does not supply missing measurements for the historical compact experiments.
+
 ### Failure Cases and Remaining Evidence
 
 The calibration outputs identify four distinct melanomas cleared as benign by at least one model. The table compares their saved scores and three-way decisions. Scores have different meanings in the two models and should be interpreted against their respective saved thresholds and referral margins.
@@ -255,7 +257,7 @@ Both compact models train and score locally on MPS. The CNN achieved higher sele
 
 The implementation now supports a controlled ResNet-18 comparison of classification alone and joint classification/contrastive learning, with the same architecture, paired-image inputs and optimiser budget. These configurations remain unrun. The fitting-reference and neighbour-disagreement diagnostic pipeline is also implemented but unrun. The next evidence is the author-run pilot comparison and its reference, referral and failure outputs. Selection average precision will guide model choices, with the final population reserved until those choices and the decision policy are frozen.
 
-The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references, using a shared calibration sensitivity target and reporting achieved sensitivity alongside workload. The new diagnostic command can generate case images, fitting references and workload curves. Completed runs, authored failure interpretation, repeated seeds and complete resource measurements are still needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
+The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references, using a shared calibration sensitivity target and reporting achieved sensitivity alongside workload. The new diagnostic command can generate case images, fitting references and workload curves, with resource instrumentation for their computation. Completed runs, authored failure interpretation, repeated seeds and measured resource results are still needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
 
 ## Reproducibility and Usage
 
@@ -372,7 +374,7 @@ python -m recognition.Siamese_ISIC2020_Melanoma_47472442.diagnostics \
   --partition selection
 ```
 
-Outputs are stored under `data/runs/<run-name>/diagnostics/<partition>/`; existing directories are refused. Diagnostic settings use CLI options: `--references-per-class 100`, `--neighbors 5`, `--target-recall 0.95`, `--max-cases 5`, `--batch-size 16` and `--device auto`. These evaluation choices remain outside the training YAML files. Gallery encoding, calibration analysis, query analysis and total elapsed time are recorded separately. Calibration encodings are reused when `--partition calibration` is selected.
+Outputs are stored under `data/runs/<run-name>/diagnostics/<partition>/`; existing directories are refused. Diagnostic settings use CLI options: `--references-per-class 100`, `--neighbors 5`, `--target-recall 0.95`, `--max-cases 5`, `--batch-size 16` and `--device auto`. These evaluation choices remain outside the training YAML files. Gallery encoding, calibration analysis, query encoding, CPU neighbour search and total elapsed time are recorded separately. Calibration encodings are reused when `--partition calibration` is selected.
 
 | Artifact | Purpose |
 | --- | --- |
@@ -402,6 +404,18 @@ with np.load(folder / "embeddings.npz") as evidence:
         folder / "embeddings.svg", "selection",
     )
 ```
+
+### Resource Measurements
+
+Training saves parameter count and a warm model-forward benchmark in `metrics.json` under `profile`. Three unmeasured warmup batches precede ten measured forwards of the same preloaded selection batch. `inference_latency_ms` is the mean **batch** latency; `latency_batch_images` records its actual size. Dividing these values gives amortised time per image, rather than the latency of a separately submitted single image. The forward includes both embedding and classifier heads, with gradients disabled, and excludes JPEG decoding, preprocessing, transfers, softmax and reference search. Accelerator work is synchronized at timing boundaries.
+
+The prediction command records `scoring_seconds` and `scoring_images_per_second` in its `evaluation.json`. This interval includes image loading, preprocessing, transfers, model inference, softmax and CPU score collection. Checkpoint loading, CSV/SVG generation and metric calculation are outside this interval and contribute to the elapsed entry-point time. Checkpoint tensors are loaded on CPU before the model is moved to the selected device, avoiding a second checkpoint copy on the accelerator.
+
+Diagnostic `evaluation.json` separates reference encoding, calibration encoding and CPU neighbour search. `calibration_seconds` also includes fitting and assessing the review cutoffs. Query encoding and neighbour search are recorded separately and summed as `query_seconds`; `query_images_per_second` uses that complete scoring interval. Gallery construction/encoding, calibration, policy assessment, CSV/NPZ exports and plotting contribute to total elapsed time. When queries reuse calibration results, `query_images_encoded` is zero and query throughput is `null`.
+
+All three commands save `process_peak_rss_bytes`, the operating system's process-lifetime high-water mark, near their final report write after artifact generation. Use a fresh Python process for each command. This RSS measurement assesses the 24 GiB process-memory criterion. Each report's `total_seconds` includes setup and artifact generation, ending immediately before the final JSON write. It excludes Python startup/imports.
+
+`accelerator_peak_allocated_bytes` reports the CUDA tensor-allocation peak since the command's reset. Training includes model, optimiser and saved-best-state allocations. `accelerator_current_allocated_bytes` records current CUDA or MPS tensor allocation at reporting. MPS and CPU have no reported accelerator peak (`null`); the MPS snapshot excludes allocator caches and is not a peak or total Metal-driver allocation. RSS and accelerator allocation must not be added together, particularly with Apple unified memory. These fields require completed author-run commands; the existing compact reports retain their original measurements.
 
 ### Saved-Score Visualisation
 
@@ -440,7 +454,7 @@ for run, prefix in (("baseline_seed42", "cnn"), ("siamese_seed42", "siamese")):
 
 ## Artificial Intelligence Usage Disclosure
 
-OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, reference/referral diagnostics, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations and reference/referral diagnostics remain unrun; implementation verification used static checks without model construction, training or inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
+OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, reference/referral diagnostics, resource instrumentation, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations, reference/referral diagnostics and new resource instrumentation remain unrun; implementation verification used static checks without model construction, training or inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
 
 ## References and Image Attribution
 
