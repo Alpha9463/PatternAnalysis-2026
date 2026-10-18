@@ -249,7 +249,7 @@ The calibration outputs identify four distinct melanomas cleared as benign by at
 
 Both models clear `ISIC_3464344` incorrectly. For `ISIC_2776906` and `ISIC_3969411`, one model flags the melanoma while the other clears it. For `ISIC_4936662`, the CNN's referral band routes an image that the Siamese policy clears. This disagreement provides concrete cases for the next qualitative review. Their visual appearances and nearest references in the fitting gallery have not yet been analysed for these runs, so no visual cause or explanation benefit is claimed here.
 
-Only one seed has been run, and the selection and calibration groups contain 41 and 50 melanoma images. No confidence intervals have been estimated. The current models also differ in architecture and training budget. These limits make the results an initial comparison rather than evidence that one learning approach consistently outperforms the other.
+Only one seed has been run, and the selection and calibration groups contain 41 and 50 melanoma images. No confidence intervals have been estimated. The current models also differ in architecture and training budget. These limits make the results an initial comparison rather than evidence that one learning approach consistently outperforms the other. The current implementation adds an offline statistical comparison for completed ResNet diagnostics; its estimates remain unrun.
 
 ## Conclusions and Future Work
 
@@ -257,11 +257,11 @@ Both compact models train and score locally on MPS. The CNN achieved higher sele
 
 The implementation now supports a controlled ResNet-18 comparison of classification alone and joint classification/contrastive learning, with the same architecture, paired-image inputs and optimiser budget. These configurations remain unrun. The fitting-reference and neighbour-disagreement diagnostic pipeline is also implemented but unrun. The next evidence is the author-run pilot comparison and its reference, referral and failure outputs. Selection average precision will guide model choices, with the final population reserved until those choices and the decision policy are frozen.
 
-The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references, using a shared calibration sensitivity target and reporting achieved sensitivity alongside workload. The new diagnostic command can generate case images, fitting references and workload curves, with resource instrumentation for their computation. Completed runs, authored failure interpretation, repeated seeds and measured resource results are still needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
+The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references, using a shared calibration sensitivity target and reporting achieved sensitivity alongside workload. The diagnostic command can generate case images, fitting references and workload curves, with resource instrumentation for their computation. The statistical comparison supports paired patient intervals and separate summaries of variation across training seeds. Completed runs, authored failure interpretation, repeated seeds and measured resource results are still needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
 
 ## Reproducibility and Usage
 
-The implementation is organised into `modules.py` for model definitions, `dataset.py` for image loading, `train.py` for fitting, checkpoint selection and calibration, and `predict.py` for checkpoint-based inference. `protocol.py` creates, loads and summarises patient roles; `provenance.py` provides configuration serialisation and file hashes. `references.py` selects and encodes fitting references, while `diagnostics.py` assembles their evidence and compares calibration-derived referral policies. The two YAML configurations now define the unrun ResNet-18 experiments. The code assumes correctly configured local inputs and uses the fixed RGB preprocessing pipeline. Historical compact scores and figures remain available for comparison, but their checkpoints are no longer supported by the current model definitions.
+The implementation is organised into `modules.py` for model definitions, `dataset.py` for image loading, `train.py` for fitting, checkpoint selection and calibration, and `predict.py` for checkpoint-based inference. `protocol.py` creates, loads and summarises patient roles; `provenance.py` provides configuration serialisation and file hashes. `references.py` selects and encodes fitting references, while `diagnostics.py` assembles their evidence and compares calibration-derived referral policies. `compare.py` analyses saved diagnostic predictions across paired seeds. The two YAML configurations now define the unrun ResNet-18 experiments. The code assumes correctly configured local inputs and uses the fixed RGB preprocessing pipeline. Historical compact scores and figures remain available for comparison, but their checkpoints are no longer supported by the current model definitions.
 
 ### Environment
 
@@ -405,6 +405,37 @@ with np.load(folder / "embeddings.npz") as evidence:
     )
 ```
 
+### Statistical Comparison
+
+After both ResNet models have completed training and their selection diagnostic commands, one seed pair can be analysed with:
+
+```bash
+python -m recognition.Siamese_ISIC2020_Melanoma_47472442.compare \
+  --baseline-runs data/runs/resnet18_baseline_seed42 \
+  --siamese-runs data/runs/resnet18_siamese_seed42 \
+  --partition selection \
+  --output-dir data/comparisons/resnet18_selection_seed42
+```
+
+This command reads `effective_config.json` and each run's `diagnostics/<partition>/evaluation.json` and `query_diagnostics.csv`. It opens no checkpoint or image. It requires matching completed roles, patient protocols, diagnostic settings and training hyperparameters. Predictions are aligned by unique image IDs, with patient IDs and labels checked. Matching seed pairs must use the same fitting-gallery identities; the baseline's actual contrastive weight must be zero and the Siamese weight positive.
+
+To summarise repeated training seeds, provide multiple directories after each of `--baseline-runs` and `--siamese-runs`. Each objective must contain one run for the same set of seeds; input ordering does not matter. Use training's existing `--seed` and `--run-name` options to create those runs with otherwise identical settings, then generate their diagnostics. The comparison's `--seed` controls only its resampling RNG (default 42); `--resamples` defaults to 2,000. Analysis settings remain outside the YAML files. The script launches no training or inference.
+
+The patient is the resampling unit, following the cluster-bootstrap principle discussed by [Field and Welsh](https://doi.org/10.1111/j.1467-9868.2007.00593.x). This project's stratified design preserves the numbers of patients with and without any melanoma. Each draw samples patients with replacement within those strata and retains every image of every sampled patient, including repeated patients. The same draw evaluates every model and seed. Metrics remain image-level and each draw uses its actual image count; predictions from different training seeds are never pooled as independent observations.
+
+The outputs cover accuracy, macro-F1, AUROC, melanoma average precision, both classes' precision/recall, and each frozen referral policy's review fraction and melanoma capture recall. They also include reference-minus-confidence workload and capture differences within each run. `siamese_minus_baseline` reports the paired objective difference for each metric. Differences are computed within each draw before taking percentile bounds. A negative workload difference indicates fewer reviewed images; its achieved capture difference must be considered alongside it. Average precision remains the primary model-selection metric; other intervals are descriptive.
+
+| Artifact | Contents |
+| --- | --- |
+| `per_seed.csv` | Estimates and approximate 95% patient percentile intervals for each seed and paired objective difference |
+| `summary.csv` | Means across seeds, sample seed SD and conditional patient intervals, including paired objective differences |
+| `comparison.json` | Role, training/bootstrap seeds, resampling settings, population counts and input-file identities |
+| `comparison.svg` | Classifier seed means and patient intervals, with paired Siamese-minus-baseline differences |
+
+Seed SD uses the original cohort's estimates and is left blank for one seed. Patient intervals average metrics across the supplied trained runs without resampling training seeds. They condition on those models, their frozen calibration rules and observed patient-stratum counts; they exclude model-training and calibration uncertainty. They also do not correct optimism from selection-based checkpoint choice. Calibration comparisons describe policy-fitting patients. Final comparisons read only previously generated, explicitly authorised final diagnostic artifacts, after all model and policy choices are frozen. No cutoff is fitted or changed by this script.
+
+Existing output directories are refused. The SVG helper `plot_statistical_comparison(summary, output_path, partition)` lives in `visualisation.py` and accepts the rows of `summary.csv`, allowing regeneration from saved results. This comparison code is implemented but unrun; no confidence bounds or multi-seed conclusions are claimed for the historical compact results.
+
 ### Resource Measurements
 
 Training saves parameter count and a warm model-forward benchmark in `metrics.json` under `profile`. Three unmeasured warmup batches precede ten measured forwards of the same preloaded selection batch. `inference_latency_ms` is the mean **batch** latency; `latency_batch_images` records its actual size. Dividing these values gives amortised time per image, rather than the latency of a separately submitted single image. The forward includes both embedding and classifier heads, with gradients disabled, and excludes JPEG decoding, preprocessing, transfers, softmax and reference search. Accelerator work is synchronized at timing boundaries.
@@ -454,7 +485,7 @@ for run, prefix in (("baseline_seed42", "cnn"), ("siamese_seed42", "siamese")):
 
 ## Artificial Intelligence Usage Disclosure
 
-OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, reference/referral diagnostics, resource instrumentation, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations, reference/referral diagnostics and new resource instrumentation remain unrun; implementation verification used static checks without model construction, training or inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
+OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, reference/referral diagnostics, resource instrumentation, statistical comparison code, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations, reference/referral diagnostics, resource instrumentation and statistical comparison remain unrun; implementation verification used static checks without model construction, training, inference or bootstrap execution. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
 
 ## References and Image Attribution
 
@@ -466,3 +497,4 @@ Dermoscopic images used by the project come from the SIIM-ISIC 2020 dataset unde
 4. He et al. [Deep Residual Learning for Image Recognition](https://arxiv.org/abs/1512.03385). *CVPR*, 2016.
 5. Guo et al. [On Calibration of Modern Neural Networks](https://proceedings.mlr.press/v70/guo17a.html). *ICML*, 2017.
 6. Torchvision. [ResNet-18 pretrained weights and preprocessing](https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html).
+7. Field and Welsh. [Bootstrapping clustered data](https://doi.org/10.1111/j.1467-9868.2007.00593.x). *Journal of the Royal Statistical Society: Series B*, 2007.

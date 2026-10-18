@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import ceil, isfinite
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplotlib"))
 
@@ -680,6 +680,84 @@ def plot_embedding_map(
         description=(
             "PCA fitted on fitting references only and then applied to query "
             "embeddings. Two-dimensional geometry does not establish classifier quality."
+        ),
+    )
+    return output_path
+
+
+def plot_statistical_comparison(
+    summary: Sequence[Mapping[str, Any]], output_path: Path, partition: str
+) -> Path:
+    """Plot classifier estimates and paired differences with patient intervals.
+
+    Parameters
+    ----------
+    summary : sequence of mapping
+        Rows from compare.py containing comparison/metric names, estimates and
+        patient_ci_lower/patient_ci_upper. Estimates average the supplied seeds.
+    output_path : pathlib.Path
+        SVG destination.
+    partition : str
+        Evaluated patient role displayed in the figure title.
+
+    Returns
+    -------
+    pathlib.Path
+        Saved plot. Intervals condition on trained runs and frozen calibration;
+        they do not incorporate training variability or selection optimism.
+    """
+
+    metrics = (
+        ("melanoma_average_precision", "Melanoma AP"),
+        ("roc_auc", "AUROC"),
+        ("macro_f1", "Macro-F1"),
+        ("melanoma_recall", "Melanoma recall"),
+    )
+    lookup = {(row["comparison"], row["metric"]): row for row in summary}
+    positions = np.arange(len(metrics))
+    figure, axes = plt.subplots(1, 2, figsize=(10, 4.6), sharey=True)
+    for name, offset, color in (
+        ("baseline", -0.12, "#1f77b4"),
+        ("siamese", 0.12, "#c45c35"),
+    ):
+        rows = [lookup[name, metric] for metric, _ in metrics]
+        y = positions + offset
+        axes[0].hlines(
+            y,
+            [float(row["patient_ci_lower"]) for row in rows],
+            [float(row["patient_ci_upper"]) for row in rows],
+            color=color,
+        )
+        axes[0].scatter(
+            [float(row["estimate"]) for row in rows], y, color=color, label=name
+        )
+    rows = [lookup["siamese_minus_baseline", metric] for metric, _ in metrics]
+    axes[1].hlines(
+        positions,
+        [float(row["patient_ci_lower"]) for row in rows],
+        [float(row["patient_ci_upper"]) for row in rows],
+        color="#505050",
+    )
+    axes[1].scatter(
+        [float(row["estimate"]) for row in rows], positions, color="#505050"
+    )
+    axes[1].axvline(0, color="#999999", linestyle="--", linewidth=1)
+    axes[0].set_yticks(positions, [label for _, label in metrics])
+    axes[0].invert_yaxis()
+    axes[0].set(title="Classifier performance", xlabel="Estimate", xlim=(0, 1))
+    axes[0].legend(loc="best")
+    axes[1].set(title="Paired objective difference", xlabel="Siamese minus baseline")
+    for axis in axes:
+        axis.grid(axis="x", alpha=0.2)
+        axis.spines[["top", "right"]].set_visible(False)
+    figure.suptitle(f"Seed means and 95% conditional patient intervals · {partition}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _save_svg(
+        figure,
+        output_path,
+        description=(
+            "Patient-cluster percentile intervals conditional on fixed trained models "
+            "and calibration. Paired differences use identical patient draws."
         ),
     )
     return output_path
