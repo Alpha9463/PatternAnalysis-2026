@@ -124,6 +124,9 @@ def plot_training_history(
     loss_axis.legend(
         loss_line + average_precision_line,
         ("Training loss", metric_label),
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.18),
+        ncol=2,
     )
     figure.tight_layout()
     figure.savefig(output_path, format="svg", bbox_inches="tight")
