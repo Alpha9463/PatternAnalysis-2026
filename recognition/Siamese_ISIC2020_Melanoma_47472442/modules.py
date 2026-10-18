@@ -1,165 +1,88 @@
-"""PyTorch model definitions for ISIC 2020 melanoma triage.
+"""ResNet-18 classifier and Siamese encoder for ISIC melanoma triage."""
 
-The module intentionally contains only model components. Image loading,
-preprocessing, losses, metrics, and visualisation remain outside this file.
-"""
-
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from torch import nn
 from torch.nn import functional as functional
+from torchvision.models import ResNet18_Weights, resnet18
 
 
 ModelName = Literal["base", "siamese"]
 
 
+def _resnet18_encoder(pretrained: bool) -> nn.Module:
+    """Create a ResNet-18 encoder returning 512 features per image."""
+
+    weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+    encoder = cast(nn.Module, resnet18(weights=weights))
+    encoder.fc = nn.Identity()
+    return encoder
+
+
 class BaseCNN(nn.Module):
-    """Classify RGB lesion images as benign or melanoma.
-
-    Notes
-    -----
-    The ISIC loader returns ``[batch, 3, 224, 224]`` float32 images. This
-    model returns raw logits ordered as benign (0) and melanoma (1), suitable
-    for direct use with ``nn.CrossEntropyLoss``.
-    """
-
-    def __init__(self) -> None:
-        """Initialise the convolutional feature extractor and classifier."""
-
-        super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.AdaptiveAvgPool2d((4, 4)),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(128 * 4 * 4, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 2),
-        )
-
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """Produce benign and melanoma logits for one batch of RGB images.
-
-        Parameters
-        ----------
-        images : torch.Tensor
-            RGB images with shape ``[batch, 3, height, width]``.
-
-        Returns
-        -------
-        torch.Tensor
-            Raw benign and melanoma logits with shape ``[batch, 2]``.
-        """
-
-        features = self.cnn(images)
-        flattened = torch.flatten(features, start_dim=1)
-        return self.fc(flattened)
-
-
-class SiameseNetwork(nn.Module):
-    """Embed two RGB lesion images with the same convolutional encoder.
+    """Classify RGB lesions with ResNet-18 and a two-class linear head.
 
     Parameters
     ----------
-    embedding_dim : int, default=128
-        Number of features in each L2-normalised image embedding.
-
-    Notes
-    -----
-    Inputs have shape ``[batch, 3, height, width]``. Adaptive pooling permits
-    positive spatial dimensions beyond the default 224-pixel square images.
+    pretrained : bool, default=True
+        Initialise the encoder with ImageNet weights.
     """
 
-    def __init__(self, embedding_dim: int = 128) -> None:
-        """Initialise the shared RGB encoder and embedding projection."""
-
+    def __init__(self, pretrained: bool = True) -> None:
         super().__init__()
-        if embedding_dim <= 0:
-            raise ValueError("embedding_dim must be positive")
-        self.cnn = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.AdaptiveAvgPool2d(1),
-        )
-        self.fc = nn.Linear(128, embedding_dim)
+        self.encoder = _resnet18_encoder(pretrained)
+        self.classifier = nn.Linear(512, 2)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """Map normalised RGB images [N, 3, 224, 224] to logits [N, 2]."""
+
+        return self.classifier(self.encoder(images))
+
+
+class SiameseNetwork(nn.Module):
+    """Embed two RGB lesions using the same ResNet-18 weights.
+
+    Parameters
+    ----------
+    pretrained : bool, default=True
+        Initialise the encoder with ImageNet weights.
+    """
+
+    def __init__(self, pretrained: bool = True) -> None:
+        super().__init__()
+        self.encoder = _resnet18_encoder(pretrained)
+        self.projection = nn.Linear(512, 128)
 
     def forward_once(self, images: torch.Tensor) -> torch.Tensor:
-        """Encode one batch of RGB images into unit-length embeddings.
+        """Map normalised RGB images [N, 3, 224, 224] to unit vectors [N, 128]."""
 
-        Parameters
-        ----------
-        images : torch.Tensor
-            RGB images with shape ``[batch, 3, height, width]``.
-
-        Returns
-        -------
-        torch.Tensor
-            Unit-length embeddings with shape ``[batch, embedding_dim]``.
-        """
-
-        features = torch.flatten(self.cnn(images), start_dim=1)
-        return functional.normalize(self.fc(features), p=2, dim=1)
+        return functional.normalize(self.projection(self.encoder(images)), p=2, dim=1)
 
     def forward(
         self, first_images: torch.Tensor, second_images: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode two image batches through the same network weights.
-
-        Parameters
-        ----------
-        first_images : torch.Tensor
-            First batch of RGB images.
-        second_images : torch.Tensor
-            Second batch of RGB images.
-
-        Returns
-        -------
-        first : torch.Tensor
-            Unit-length embeddings for ``first_images``.
-        second : torch.Tensor
-            Unit-length embeddings for ``second_images``.
-        """
+        """Return embeddings for both image batches through the shared encoder."""
 
         return self.forward_once(first_images), self.forward_once(second_images)
 
 
-def build_model(model_name: ModelName) -> BaseCNN | SiameseNetwork:
-    """Construct one supported model with its standard configuration.
+def build_model(
+    model_name: ModelName, pretrained: bool = True
+) -> BaseCNN | SiameseNetwork:
+    """Construct a classifier or Siamese model.
 
     Parameters
     ----------
     model_name : {"base", "siamese"}
-        Architecture selected for the run.
+        Model type to construct.
+    pretrained : bool, default=True
+        Use ImageNet initialisation. Checkpoint prediction passes ``False``.
 
     Returns
     -------
     BaseCNN or SiameseNetwork
-        Newly constructed model with RGB inputs.
-
-    Raises
-    ------
-    ValueError
-        If ``model_name`` is unsupported.
+        ResNet-18 model with the corresponding output head.
     """
 
-    if model_name == "base":
-        return BaseCNN()
-    if model_name == "siamese":
-        return SiameseNetwork()
-    raise ValueError(f"Unsupported model: {model_name}")
+    return BaseCNN(pretrained) if model_name == "base" else SiameseNetwork(pretrained)

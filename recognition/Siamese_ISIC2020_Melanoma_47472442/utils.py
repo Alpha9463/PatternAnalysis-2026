@@ -4,14 +4,10 @@ import random
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, TypeAlias, overload
+from typing import Any
 
 import numpy as np
 import torch
-
-
-DeviceData: TypeAlias = torch.Tensor | tuple["DeviceData", ...] | list["DeviceData"]
-InferenceCall: TypeAlias = Callable[[], object]
 
 
 def set_seed(seed: int = 42) -> None:
@@ -37,49 +33,20 @@ def select_device(requested: str = "auto") -> torch.device:
     -------
     torch.device
         Device selected for training and inference.
-
-    Raises
-    ------
-    ValueError
-        If the requested device is unknown or unavailable.
     """
 
-    if requested not in {"auto", "cpu", "mps", "cuda"}:
-        raise ValueError(f"Unknown device: {requested}")
     if requested == "auto":
         requested = (
             "cuda"
             if torch.cuda.is_available()
             else ("mps" if torch.backends.mps.is_available() else "cpu")
         )
-    if requested == "cuda" and not torch.cuda.is_available():
-        raise ValueError("CUDA was requested but is unavailable")
-    if requested == "mps" and not torch.backends.mps.is_available():
-        raise ValueError("MPS was requested but is unavailable")
     return torch.device(requested)
 
 
-@overload
-def to_device(data: torch.Tensor, device: torch.device) -> torch.Tensor: ...
+def to_device(data: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Move a tensor to the selected device."""
 
-
-@overload
-def to_device(
-    data: tuple[DeviceData, ...], device: torch.device
-) -> tuple[DeviceData, ...]: ...
-
-
-@overload
-def to_device(data: list[DeviceData], device: torch.device) -> list[DeviceData]: ...
-
-
-def to_device(data: DeviceData, device: torch.device) -> DeviceData:
-    """Move a tensor or nested tuple/list of tensors to a device."""
-
-    if isinstance(data, tuple):
-        return tuple(to_device(item, device) for item in data)
-    if isinstance(data, list):
-        return [to_device(item, device) for item in data]
     return data.to(device)
 
 
@@ -113,13 +80,10 @@ def save_checkpoint(path: Path, checkpoint: Mapping[str, object]) -> None:
 
 def load_checkpoint(
     path: Path, map_location: torch.device | str | None = None
-) -> dict[str, object]:
-    """Load and minimally validate one experiment checkpoint."""
+) -> dict[str, Any]:
+    """Load the dictionary saved by the training pipeline."""
 
-    loaded: Any = torch.load(path, map_location=map_location)
-    if not isinstance(loaded, dict):
-        raise ValueError(f"Checkpoint must contain a dictionary: {path}")
-    return loaded
+    return torch.load(path, map_location=map_location)
 
 
 def select_triage_rule(
@@ -135,17 +99,7 @@ def select_triage_rule(
     of validation scores around that threshold.
     """
 
-    if labels.ndim != 1 or scores.ndim != 1 or labels.shape != scores.shape:
-        raise ValueError("labels and scores must be one-dimensional arrays of equal size")
-    if not np.isfinite(scores).all():
-        raise ValueError("scores must be finite")
-    if not 0 < target_recall <= 1:
-        raise ValueError("target_recall must be between 0 and 1")
-    if not 0 <= referral_fraction < 1:
-        raise ValueError("referral_fraction must be between 0 and 1")
     positive_scores = np.sort(scores[labels == 1])[::-1]
-    if len(positive_scores) == 0:
-        raise ValueError("Validation data contains no melanoma images")
     required_positives = int(np.ceil(target_recall * len(positive_scores)))
     threshold = float(positive_scores[required_positives - 1])
     margin = float(np.quantile(np.abs(scores - threshold), referral_fraction))
@@ -160,11 +114,8 @@ def select_triage_rule(
 def apply_triage_rule(score: float, rule: Mapping[str, float]) -> str:
     """Return the frozen automated decision for one model score."""
 
-    try:
-        threshold = rule["threshold"]
-        margin = rule["referral_margin"]
-    except KeyError as error:
-        raise ValueError("Triage rule needs threshold and referral_margin") from error
+    threshold = rule["threshold"]
+    margin = rule["referral_margin"]
     if score >= threshold + margin:
         return "melanoma"
     if score <= threshold - margin:
@@ -178,10 +129,7 @@ def reset_peak_accelerator_memory(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     elif device.type == "mps":
-        mps = getattr(torch, "mps", None)
-        empty_cache = getattr(mps, "empty_cache", None)
-        if callable(empty_cache):
-            empty_cache()
+        torch.mps.empty_cache()
 
 
 def peak_accelerator_memory_bytes(device: torch.device) -> int | None:
@@ -190,25 +138,18 @@ def peak_accelerator_memory_bytes(device: torch.device) -> int | None:
     if device.type == "cuda":
         return int(torch.cuda.max_memory_allocated(device))
     if device.type == "mps":
-        mps = getattr(torch, "mps", None)
-        current_allocated_memory = getattr(mps, "current_allocated_memory", None)
-        if callable(current_allocated_memory):
-            value = current_allocated_memory()
-            if isinstance(value, int):
-                return value
+        return int(torch.mps.current_allocated_memory())
     return None
 
 
 def measure_inference_latency_ms(
-    inference: InferenceCall,
+    inference: Callable[[], object],
     device: torch.device,
     warmup_iterations: int = 3,
     repetitions: int = 10,
 ) -> float:
     """Measure mean synchronous inference latency for one fixed input batch."""
 
-    if warmup_iterations < 0 or repetitions < 1:
-        raise ValueError("warmup_iterations must be non-negative and repetitions positive")
     for _ in range(warmup_iterations):
         inference()
     _synchronise(device)
@@ -225,7 +166,4 @@ def _synchronise(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elif device.type == "mps":
-        mps = getattr(torch, "mps", None)
-        synchronise = getattr(mps, "synchronize", None)
-        if callable(synchronise):
-            synchronise()
+        torch.mps.synchronize()

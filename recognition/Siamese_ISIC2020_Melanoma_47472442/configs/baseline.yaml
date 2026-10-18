@@ -1,9 +1,7 @@
-# Direct CNN baseline on the frozen patient partitions.
+# ResNet-18 direct classifier.
 model: base
-run_name: baseline_seed42
-output_dir: data/runs
-protocol_manifest: data/splits/isic_protocol.json
+pretrained: true
+
 epochs: 5
 batch_size: 16
-learning_rate: 0.001
-seed: 42
+learning_rate: 0.0001

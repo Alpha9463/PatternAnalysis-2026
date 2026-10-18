@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import torch
@@ -80,9 +81,7 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
 def subset_labels(subset: Subset) -> np.ndarray:
     """Read binary labels from subset metadata without decoding images."""
 
-    dataset = subset.dataset
-    if not isinstance(dataset, ISICImageDataset):
-        raise TypeError("subset must wrap an ISICImageDataset")
+    dataset = cast(ISICImageDataset, subset.dataset)
     return np.asarray(
         [dataset.samples[index].label for index in subset.indices], dtype=np.int64
     )
@@ -161,11 +160,7 @@ def train_siamese_epoch(
 def make_gallery(subset: Subset, per_class: int, seed: int) -> Subset:
     """Select a deterministic, patient-diverse labelled training gallery."""
 
-    if per_class < 1:
-        raise ValueError("gallery_per_class must be positive")
-    dataset = subset.dataset
-    if not isinstance(dataset, ISICImageDataset):
-        raise TypeError("subset must wrap an ISICImageDataset")
+    dataset = cast(ISICImageDataset, subset.dataset)
     rng = random.Random(seed)
     selected: list[int] = []
     for label in (0, 1):
@@ -221,12 +216,8 @@ def score_siamese(
     probability.
     """
 
-    if neighbors < 1:
-        raise ValueError("neighbors must be positive")
     gallery_embeddings, gallery_labels = encode(model, gallery_loader, device)
     references = [gallery_embeddings[gallery_labels == label] for label in (0, 1)]
-    if any(len(reference) < neighbors for reference in references):
-        raise ValueError("Gallery needs at least 'neighbors' images from each class")
     model.eval()
     scores: list[float] = []
     labels: list[int] = []
@@ -294,6 +285,12 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument(
         "--model", choices=("base", "siamese"), default=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--pretrained",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help="Initialise ResNet-18 with ImageNet weights (may download once).",
+    )
     parser.add_argument("--run-name", default=argparse.SUPPRESS)
     parser.add_argument("--images-dir", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--metadata-csv", type=Path, default=argparse.SUPPRESS)
@@ -353,26 +350,9 @@ def build_datasets(args: RunConfig) -> TrainingData:
         Fitting, gallery, selection and calibration views, without a final loader.
     """
 
-    if not args.protocol_manifest.is_file():
-        raise FileNotFoundError(
-            f"Frozen protocol not found: {args.protocol_manifest}. "
-            "Create it explicitly with the protocol module before training."
-        )
-    dataset = ISICImageDataset(
-        args.images_dir,
-        args.metadata_csv,
-        image_size=224,
-        color_mode="RGB",
-        training=False,
-    )
+    dataset = ISICImageDataset(args.images_dir, args.metadata_csv)
     indices = load_protocol_manifest(dataset, args.protocol_manifest)
-    augmented = ISICImageDataset(
-        args.images_dir,
-        args.metadata_csv,
-        image_size=224,
-        color_mode="RGB",
-        training=True,
-    )
+    augmented = ISICImageDataset(args.images_dir, args.metadata_csv, training=True)
     return TrainingData(
         fit=Subset(augmented, list(indices.fit)),
         gallery=Subset(dataset, list(indices.fit)),
@@ -463,8 +443,6 @@ def main() -> None:
     set_seed(args.seed)
     device = select_device(args.device)
     run_directory = args.output_dir / args.run_name
-    if run_directory.exists():
-        raise FileExistsError(f"Run directory already exists: {run_directory}")
     data = build_datasets(args)
     identity = protocol_identity(args.protocol_manifest)
     preprocessing = model_preprocessing()
@@ -485,16 +463,14 @@ def main() -> None:
     calibration_loader = DataLoader(data.calibration, batch_size=args.batch_size)
 
     reset_peak_accelerator_memory(device)
-    model = build_model(args.model).to(device)
+    model = build_model(args.model, pretrained=args.pretrained).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     train_one_epoch: Callable[[], float]
     score_images: Callable[[DataLoader], tuple[np.ndarray, np.ndarray]]
     pairs: SiamesePairDataset | None = None
     gallery_image_names: list[str] = []
     if isinstance(model, BaseCNN):
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
         counts = np.bincount(subset_labels(data.fit), minlength=2)
-        if np.any(counts == 0):
-            raise ValueError("Fitting partition must include both classes")
         weights = torch.tensor(
             len(data.fit) / (2 * counts), dtype=torch.float32, device=device
         )
@@ -504,8 +480,7 @@ def main() -> None:
             train_base_epoch, model, train_loader, optimizer, criterion, device
         )
         score_images = partial(score_base, model, device=device)
-    elif isinstance(model, SiameseNetwork):
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    else:
         pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
         pair_loader = DataLoader(pairs, batch_size=args.batch_size, shuffle=True)
         gallery = make_gallery(data.gallery, args.gallery_per_class, args.seed)
@@ -523,12 +498,10 @@ def main() -> None:
             device=device,
             neighbors=args.neighbors,
         )
-    else:
-        raise TypeError(f"Unsupported model instance: {type(model).__name__}")
 
     best_average_precision = -1.0
     best_epoch = 0
-    best_state: dict[str, torch.Tensor] | None = None
+    best_state: dict[str, torch.Tensor] = {}
     history: list[dict[str, float]] = []
     training_seconds = 0.0
     selection_seconds = 0.0
@@ -566,8 +539,6 @@ def main() -> None:
             best_epoch = epoch + 1
             best_state = copy.deepcopy(model.state_dict())
 
-    if best_state is None:
-        raise RuntimeError("No checkpoint was selected")
     model.load_state_dict(best_state)
     phase_started = time.perf_counter()
     selection_scores, selection_labels = score_images(selection_loader)
@@ -592,8 +563,8 @@ def main() -> None:
         "elapsed_before_save_seconds": time.perf_counter() - started,
     }
     report: dict[str, object] = {
-        "schema_version": 2,
         "model": args.model,
+        "pretrained": args.pretrained,
         "device": str(device),
         "seed": args.seed,
         "run_name": args.run_name,
@@ -623,9 +594,7 @@ def main() -> None:
         "final_evaluated": False,
     }
     checkpoint = {
-        "schema_version": 2,
         "model_name": args.model,
-        "model_kwargs": {},
         "state_dict": cpu_state_dict(model),
         "preprocessing": preprocessing,
         "protocol": identity,
