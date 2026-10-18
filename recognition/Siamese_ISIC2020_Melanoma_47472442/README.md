@@ -14,7 +14,7 @@ The study uses the labelled training images from the [SIIM-ISIC 2020 Challenge d
 
 Images are loaded lazily and converted to RGB. The completed compact models use a square resize to 224 × 224 pixels and floating-point tensors with values in the range [0, 1]. The ResNet-18 configurations instead use the [official ImageNet preprocessing preset](https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html): bilinear resize of the shorter side to 256 pixels, centre crop to 224 × 224, scaling to [0, 1], and channel normalisation with mean (0.485, 0.456, 0.406) and standard deviation (0.229, 0.224, 0.225). These settings also apply to a ResNet initialised without pretrained weights.
 
-The current loader uses only the ResNet-18 pipeline. Horizontal and vertical flips are applied before preprocessing during fitting only. Selection, calibration, gallery and prediction views use the same deterministic preset. The checkpoint records its description. Lazy loading avoids retaining the full image archive in memory.
+The current loader uses only the ResNet-18 pipeline. Horizontal and vertical flips are applied before preprocessing during fitting only. Selection, calibration and prediction views use the same deterministic preset. The checkpoint records its description. Lazy loading avoids retaining the full image archive in memory.
 
 The completed comparison uses the standalone patient protocol in `data/splits/isic_protocol.json`. A deterministic recipe separates a 70% fitting pool, 15% tuning pool and 15% development population using seed 42. It reserves 20% of the fitting pool for final evaluation using seed 20261007, and divides the tuning patients equally between checkpoint selection and decision calibration using seed 20261008. Every division stratifies patients by whether any of their images contains melanoma, and every image from a patient remains in the same role. Image fractions differ from patient fractions because patients contribute different numbers of lesions. The development population corresponds to previously examined test patients and is excluded from the current comparison.
 
@@ -40,15 +40,39 @@ The Siamese model passes two RGB images through the same encoder weights and pro
 
 Training pairs are balanced between same-class and different-class examples and are drawn from different training patients. In the completed compact experiment, the encoder used the same convolutional channel widths as the baseline but pooled to a single spatial feature vector before projection. Those historical models therefore differed in pooling and output heads. Future runs use the common ResNet-18 encoder described below.
 
-Individual-image classification is obtained by comparing a query embedding with a fixed, labelled gallery containing training images only. For each class, the model finds the configured number of nearest references and computes their mean distance. The melanoma score is the mean benign-reference distance minus the mean melanoma-reference distance; a larger score indicates relatively closer melanoma references. This converts pairwise learning into an image-level classifier without interpreting pair accuracy as melanoma detection accuracy. The gallery score is not assumed to be a calibrated probability.
+In the completed compact Siamese run, individual-image classification compared a query embedding with a fixed, labelled fitting gallery. For each class, the model averaged distances to the five nearest references among 100 images per class. Its melanoma score was the mean benign-reference distance minus the mean melanoma-reference distance; a larger score indicated relatively closer melanoma references. The checkpoint recorded the gallery identifiers, and this gallery score was not assumed to be a calibrated probability. These historical results remain reported below.
 
-The standard Siamese configuration uses 100 gallery images per class and five neighbours per class. The checkpoint stores the selected gallery image identifiers and neighbour count, allowing prediction to reconstruct the same reference context. New runs restrict both training pairs and gallery references to the fitting role, excluding selection, calibration, final and development images.
+The current ResNet implementation instead trains a binary classifier directly on the metric-trained embedding. This makes the same learned representation responsible for both pair similarity and the image-level melanoma decision. Fitting-reference diagnostics and neighbour disagreement will be investigated separately after the controlled classifier comparison.
 
 ### Current ResNet-18 Architecture
 
-ResNet-18 is now the only feature extractor in the codebase. Its original ImageNet classifier is removed, leaving a 512-dimensional feature vector. The direct classifier maps this vector to two logits; the Siamese model maps it to a normalised 128-dimensional embedding. Both use the same encoder architecture and default to the same ImageNet initialisation. All backbone parameters are trainable.
+Both current configurations use the same `MelanomaModel`: ResNet-18 produces 512 features, a linear projection produces a normalised 128-dimensional embedding, and a linear classifier maps that embedding to benign and melanoma logits. All parameters are trainable. The classifier consumes the same embedding supervised by the contrastive objective, so inference uses the metric-trained representation directly.
 
-The new configurations use a learning rate of 0.0001, five epochs and batch size 16. The classifier retains weighted cross-entropy, while the Siamese model retains contrastive loss and fitting-gallery scoring. Thus this batch supplies a common encoder but does not yet implement joint classification and contrastive training or equalise optimisation budgets. The two configurations have not been run, and all quantitative results below belong to the compact models.
+```mermaid
+flowchart LR
+    I["RGB image"] --> R["Shared ResNet-18"]
+    R --> P["512 to 128 projection"]
+    P --> E["L2-normalised embedding"]
+    E --> H["128 to 2 classifier"]
+    H --> S["Melanoma softmax score"]
+    H --> C["Classification loss"]
+    E --> M["Cross-patient pair contrastive loss"]
+```
+
+The two members of every pair are concatenated into one image batch and pass through the shared network once. Cross-entropy supervises both image labels. The pair loss pulls same-class embeddings together and penalises different-class embeddings whose Euclidean distance is below margin $m$:
+
+$$
+L = L_{\mathrm{CE}} + \lambda L_{\mathrm{contrastive}}, \qquad
+L_{\mathrm{contrastive}} = \operatorname{mean}\left[s d^2 + (1-s)\max(0,m-d)^2\right],
+$$
+
+where $s=1$ for matching image labels and $d$ is the distance between the two normalised embeddings. The classification-only baseline uses $\lambda=0$; the joint Siamese configuration uses $\lambda=1$ and $m=1$. These are initial pilot settings, not empirically selected optima. Both configurations still record the raw contrastive loss as an embedding diagnostic. Total training losses differ by definition and should not be used to rank the two experiments.
+
+Both configurations sample 4,096 pairs per epoch, alternating matching and different labels and always choosing different patients within a pair. First-image labels are sampled uniformly, and patients are sampled within each label, making image classes approximately balanced during training. Ordinary cross-entropy is therefore used without additional inverse-frequency class weights. Selection and calibration retain their natural prevalence. A dedicated shuffle generator and deterministic pair streams give the same sampled inputs for the same seed in both configurations.
+
+With five epochs and batch size 16 **pairs**, each model receives 8,192 image presentations and 256 optimiser updates per epoch: 40,960 image presentations and 1,280 updates in total. A full training forward contains 32 images; scoring and latency profiling use batches of 16 individual images. The architecture, initialisation, augmentation, sampler, learning rate and optimiser budget are matched, isolating the added contrastive term within this experiment. Neither current configuration has been run, so the quantitative results below remain those of the compact models.
+
+ImageNet initialisation uses Torchvision's `ResNet18_Weights.IMAGENET1K_V1`; the original ImageNet classifier is replaced by this project's projection and binary head. The provided draft brief's Siamese entry does not require training from scratch or prohibit ImageNet initialisation, but it does not explicitly confirm permission for this task. The implementation proceeds on the interpretation that generic pretrained initialisation is compatible with the required Siamese learning; this is not a recorded teaching-team approval. The weight source is attributed in the references, and `--no-pretrained` supports the same architecture from random initialisation.
 
 ### Model Selection and Decision Rule
 
@@ -74,9 +98,9 @@ The local resource constraint is a two-hour Apple MPS pilot at batch size 16 and
 
 ### Model Choice and Course Concepts
 
-The selected Hard option is a Siamese network on ISIC 2020. The existing shared CNN learns normalised 128-dimensional embeddings with contrastive loss, and a fixed training gallery supplies the image classification score. A proposed extension uses an ImageNet-pretrained ResNet-18 encoder with a projection and binary head, jointly optimised for classification and contrastive learning. An otherwise identical encoder trained without the metric loss would isolate the contribution of Siamese learning.
+The selected Hard option is a Siamese network on ISIC 2020. The completed compact model learned normalised embeddings with contrastive loss and used a fitting-gallery score. The current implementation adds a binary head on the shared ResNet-18 embedding and jointly optimises classification and contrastive learning. An otherwise identical configuration with zero metric-loss weight supplies the controlled classification-only baseline.
 
-The design connects CNNs, shared weights, embedding geometry, class imbalance, generalisation and selective prediction. Its literature basis includes [Hadsell et al.](https://doi.org/10.1109/CVPR.2006.100) for contrastive learning, [He et al.](https://arxiv.org/abs/1512.03385) for residual networks and [Guo et al.](https://proceedings.mlr.press/v70/guo17a.html) for calibration. The shared pretrained encoder is now implemented but unevaluated; the joint objective remains proposed.
+The design connects CNNs, shared weights, embedding geometry, class imbalance, generalisation and selective prediction. Its literature basis includes [Hadsell et al.](https://doi.org/10.1109/CVPR.2006.100) for contrastive learning, [He et al.](https://arxiv.org/abs/1512.03385) for residual networks and [Guo et al.](https://proceedings.mlr.press/v70/guo17a.html) for calibration. The shared pretrained encoder and joint objective are implemented but unevaluated.
 
 ### Local Execution Evidence
 
@@ -217,7 +241,7 @@ Only one seed has been run, and the selection and calibration groups contain 41 
 
 Both compact models train and score locally on MPS. The CNN achieved higher selection average precision (0.0628 versus 0.0555), while the Siamese model achieved higher selection AUROC (0.7964 versus 0.7457). At the calibration threshold targeting 90% melanoma recall, precision remained below 4% for both. Their three-way policies routed approximately 55% of calibration images for review while still clearing melanomas incorrectly. The completed comparison therefore establishes working baselines and an unresolved sensitivity–workload trade-off.
 
-The implementation now supports a common pretrained ResNet-18 encoder, matching preprocessing and checkpoint reconstruction for both model variants. These configurations remain unrun. The next implementation step is joint classification and contrastive training, enabling comparison with classification loss alone under comparable training budgets. Selection average precision will guide model choices, with the final population reserved until those choices and the decision policy are frozen.
+The implementation now supports a controlled ResNet-18 comparison of classification alone and joint classification/contrastive learning, with the same architecture, paired-image inputs and optimiser budget. These configurations remain unrun. The next evidence is the author-run pilot comparison, followed by fitting-reference and neighbour-disagreement diagnostics for referral and failure analysis. Selection average precision will guide model choices, with the final population reserved until those choices and the decision policy are frozen.
 
 The intended contribution is an empirical comparison of referral based on classifier confidence and referral based on disagreement among training references at matched melanoma sensitivity. Case images, fitting references, workload curves, repeated runs and complete resource measurements are needed to establish whether metric learning adds useful triage evidence. If no reliable advantage emerges, the report will favour the simpler classifier with an empirically assessed decision rule and human review.
 
@@ -273,7 +297,7 @@ Training loads the saved patient split. Datasets, manifests, checkpoints and gen
 
 ### Training and Saved Artifacts
 
-The completed compact runs remain under `data/runs/baseline_seed42/` and `data/runs/siamese_seed42/`. The current `baseline.yaml` and `siamese.yaml` files contain only model selection, pretrained initialisation and training hyperparameters: epochs, batch size, learning rate and, for the Siamese model, pairs per epoch. Run names and input/output paths are supplied separately through CLI arguments or Python defaults. Seed 42, automatic device selection, calibration recall 0.9, 100 gallery references per class and five neighbours remain Python defaults, with CLI overrides available. Explicit CLI arguments take precedence over YAML values.
+The completed compact runs remain under `data/runs/baseline_seed42/` and `data/runs/siamese_seed42/`. The current `baseline.yaml` and `siamese.yaml` files contain only the objective choice, pretrained initialisation and training hyperparameters: epochs, batch size in pairs, learning rate, pairs per epoch, contrastive weight and margin. Run names and input/output paths are supplied separately through CLI arguments or Python defaults. Seed 42, automatic device selection and calibration recall 0.9 remain Python defaults, with CLI overrides available. Explicit CLI arguments take precedence over YAML values. `model: base` fixes the contrastive multiplier to zero; `model: siamese` enables the configured multiplier.
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
@@ -289,7 +313,7 @@ python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
 
 The first pretrained training invocation may download the ImageNet weights into Torch's local cache. Subsequent invocations reuse that cache. Setting `pretrained: false` or passing `--no-pretrained` initialises ResNet-18 from scratch while retaining the same preprocessing.
 
-Each run saves `effective_config.json`, `checkpoint.pt`, `metrics.json`, `selection_predictions.csv`, `calibration_predictions.csv` and `training.svg` under `data/runs/<run-name>/`. Existing run directories are refused. The configuration records the settings actually used after defaults and overrides, including pretrained initialisation; its file hash links the checkpoint and metrics to those settings. The checkpoint also records the model type, preprocessing, patient protocol, fitting patients, gallery identifiers, scoring settings, selected epoch and calibration-derived decision rule. Metrics record the initialisation setting, seed, resolved device, phase timings and development results. Training does not create a final prediction loader or save final scores.
+Each run saves `effective_config.json`, `checkpoint.pt`, `metrics.json`, `selection_predictions.csv`, `calibration_predictions.csv` and `training.svg` under `data/runs/<run-name>/`. Existing run directories are refused. The configuration records the settings actually used after defaults and overrides, including pretrained initialisation; its file hash links the checkpoint and metrics to those settings. The checkpoint also records the objective label and loss settings, learned projection and classifier tensors, preprocessing, patient protocol, fitting patients, score meaning, selected epoch and calibration-derived decision rule. Metrics record the initialisation setting, seed, resolved device, loss components, image/optimiser budgets, phase timings and development results. Training does not create a final prediction loader or save final scores.
 
 ### Checkpoint Prediction
 
@@ -318,7 +342,7 @@ python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
 
 The reported compact comparison uses its saved CSVs. The prediction commands above apply to future completed ResNet runs; they do not reproduce the historical compact inference.
 
-Prediction prints and saves image identifiers, ground-truth labels, scores, binary predictions and triage decisions. For a Siamese checkpoint, it reconstructs the saved fitting gallery and neighbour count, using only eligible fitting images.
+Prediction prints and saves image identifiers, ground-truth labels, scores, binary predictions and triage decisions. Both objectives use the softmax melanoma score from the saved classifier on the normalised embedding. Pair labels, neighbour voting and gallery scores do not enter this image-level inference path. The score remains a ranking measure; class-balanced training does not establish probability calibration at natural melanoma prevalence.
 
 ### Saved-Score Visualisation
 
@@ -342,7 +366,7 @@ python -m recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation \
 
 Omitting `--output` saves `roc_pr.svg` in the selected run directory. `--predictions <path>` selects another saved CSV, such as final predictions produced by the explicit evaluation command; it does not score any images. The same command accepts a completed Siamese run because the curve calculations require ranking scores rather than calibrated probabilities. Both classes must be present in the prediction file. The plotted PR summary is average precision, and the horizontal reference line represents the plotted melanoma prevalence.
 
-The training-history figures use the same `plot_training_history` helper called by `train.py`. They can be regenerated from the saved histories without rerunning a model:
+The training-history figures use the same `plot_training_history` helper called by `train.py`. New histories also plot cross-entropy and raw contrastive loss alongside total loss and selection average precision. Historical compact histories retain their available loss and selection curves. Figures can be regenerated without rerunning a model:
 
 ```python
 import json
@@ -357,7 +381,7 @@ for run, prefix in (("baseline_seed42", "cnn"), ("siamese_seed42", "siamese")):
 
 ## Artificial Intelligence Usage Disclosure
 
-OpenAI Codex assisted with code organisation, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the training runs. This report refresh used existing outputs without executing training or model inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
+OpenAI Codex assisted with code organisation, the shared ResNet implementation, joint-loss training and prediction code, documentation, review of public prior-year feedback, experiment planning and analysis of saved artifacts. For this comparison, metrics and decisions were recomputed from the saved CSV scores, patient and label joins were checked against the protocol and ground truth, and SVG curves were generated using the repository's visualisation code. The author performed the completed compact training runs. The ResNet configurations remain unrun; implementation verification used static checks without model construction, training or inference. The author remains responsible for reviewing the generated material and defending the architectural choices, experimental procedure and interpretation of the results.
 
 ## References and Image Attribution
 

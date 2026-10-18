@@ -15,13 +15,11 @@ import argparse
 import copy
 import csv
 import json
-import random
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import torch
@@ -55,9 +53,7 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.provenance import (
     file_sha256,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
-    BaseCNN,
-    SiameseNetwork,
-    build_model,
+    MelanomaModel,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     apply_triage_rule,
@@ -78,158 +74,76 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
 )
 
 
-def subset_labels(subset: Subset) -> np.ndarray:
-    """Read binary labels from subset metadata without decoding images."""
-
-    dataset = cast(ISICImageDataset, subset.dataset)
-    return np.asarray(
-        [dataset.samples[index].label for index in subset.indices], dtype=np.int64
-    )
-
-
-def train_base_epoch(
-    model: BaseCNN,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
-) -> float:
-    """Train the direct classifier for one epoch and return mean loss."""
-
-    model.train()
-    total_loss = 0.0
-    seen = 0
-    for images, labels in loader:
-        device_images = to_device(images, device)
-        device_labels = to_device(labels, device)
-        optimizer.zero_grad(set_to_none=True)
-        loss = criterion(model(device_images), device_labels)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * len(labels)
-        seen += len(labels)
-    return total_loss / seen
-
-
-@torch.no_grad()
-def score_base(
-    model: BaseCNN, loader: DataLoader, device: torch.device
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return melanoma softmax scores and labels from the direct classifier."""
-
-    model.eval()
-    scores: list[float] = []
-    labels: list[int] = []
-    for images, targets in loader:
-        logits = model(to_device(images, device))
-        scores.extend(to_cpu(logits.softmax(dim=1)[:, 1]).tolist())
-        labels.extend(targets.tolist())
-    return np.asarray(scores), np.asarray(labels, dtype=np.int64)
-
-
-def train_siamese_epoch(
-    model: SiameseNetwork,
+def train_epoch(
+    model: MelanomaModel,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
-    margin: float = 1.0,
-) -> float:
-    """Train image embeddings with a balanced contrastive loss."""
+    contrastive_weight: float,
+    margin: float,
+) -> dict[str, float]:
+    """Fit one epoch on identical paired-image batches for either objective.
 
-    model.train()
-    total_loss = 0.0
-    seen = 0
-    for first, second, same in loader:
-        first_images = to_device(first, device)
-        second_images = to_device(second, device)
-        same_labels = to_device(same, device)
-        optimizer.zero_grad(set_to_none=True)
-        first_embedding, second_embedding = model(first_images, second_images)
-        distance = functional.pairwise_distance(first_embedding, second_embedding)
-        loss = (
-            same_labels * distance.square()
-            + (1 - same_labels) * functional.relu(margin - distance).square()
-        ).mean()
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * len(same)
-        seen += len(same)
-    return total_loss / seen
+    Parameters
+    ----------
+    model : MelanomaModel
+        Shared encoder, normalised projection and two-class head.
+    loader : torch.utils.data.DataLoader
+        Fitting-only pairs with each member's image label.
+    optimizer : torch.optim.Optimizer
+        Optimiser shared by both experiment configurations.
+    device : torch.device
+        Training device.
+    contrastive_weight, margin : float
+        Contrastive multiplier and different-class distance margin. A zero
+        multiplier gives the classification-only ablation.
 
-
-def make_gallery(subset: Subset, per_class: int, seed: int) -> Subset:
-    """Select a deterministic, patient-diverse labelled training gallery."""
-
-    dataset = cast(ISICImageDataset, subset.dataset)
-    rng = random.Random(seed)
-    selected: list[int] = []
-    for label in (0, 1):
-        by_patient: dict[str, list[int]] = {}
-        for index in subset.indices:
-            sample = dataset.samples[index]
-            if sample.label == label:
-                by_patient.setdefault(sample.patient_id, []).append(index)
-        patient_ids = sorted(by_patient)
-        rng.shuffle(patient_ids)
-        for patient_id in patient_ids[:per_class]:
-            selected.append(rng.choice(by_patient[patient_id]))
-        if len(patient_ids) < per_class:
-            remaining = [
-                index
-                for patient_id in patient_ids
-                for index in by_patient[patient_id]
-                if index not in selected
-            ]
-            selected.extend(
-                rng.sample(remaining, min(per_class - len(patient_ids), len(remaining)))
-            )
-    return Subset(dataset, selected)
-
-
-@torch.no_grad()
-def encode(
-    model: SiameseNetwork, loader: DataLoader, device: torch.device
-) -> tuple[torch.Tensor, np.ndarray]:
-    """Return CPU embeddings and labels for an image loader."""
-
-    model.eval()
-    embeddings: list[torch.Tensor] = []
-    labels: list[int] = []
-    for images, targets in loader:
-        embeddings.append(to_cpu(model.forward_once(to_device(images, device))))
-        labels.extend(targets.tolist())
-    return torch.cat(embeddings), np.asarray(labels, dtype=np.int64)
-
-
-@torch.no_grad()
-def score_siamese(
-    model: SiameseNetwork,
-    loader: DataLoader,
-    gallery_loader: DataLoader,
-    device: torch.device,
-    neighbors: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Rank melanoma by nearest gallery distance from each reference class.
-
-    Higher scores indicate lower distance to melanoma references than benign
-    references. The score is a ranking measure and not a calibrated
-    probability.
+    Returns
+    -------
+    dict of str to float
+        Mean total, classification and unweighted contrastive losses.
     """
 
-    gallery_embeddings, gallery_labels = encode(model, gallery_loader, device)
-    references = [gallery_embeddings[gallery_labels == label] for label in (0, 1)]
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    totals = {"train_loss": 0.0, "classification_loss": 0.0, "contrastive_loss": 0.0}
+    seen = 0
+    for first, second, first_targets, second_targets in loader:
+        images = to_device(torch.cat((first, second)), device)
+        labels = to_device(torch.cat((first_targets, second_targets)), device)
+        optimizer.zero_grad(set_to_none=True)
+        logits, embeddings = model(images)
+        first_embedding, second_embedding = embeddings.chunk(2)
+        distance = functional.pairwise_distance(first_embedding, second_embedding)
+        same = (first_targets == second_targets).to(device=device, dtype=torch.float32)
+        classification_loss = criterion(logits, labels)
+        contrastive_loss = (
+            same * distance.square()
+            + (1 - same) * functional.relu(margin - distance).square()
+        ).mean()
+        loss = classification_loss + contrastive_weight * contrastive_loss
+        loss.backward()
+        optimizer.step()
+        batch_pairs = len(first_targets)
+        totals["train_loss"] += loss.item() * batch_pairs
+        totals["classification_loss"] += classification_loss.item() * batch_pairs
+        totals["contrastive_loss"] += contrastive_loss.item() * batch_pairs
+        seen += batch_pairs
+    return {name: value / seen for name, value in totals.items()}
+
+
+@torch.no_grad()
+def score_model(
+    model: MelanomaModel, loader: DataLoader, device: torch.device
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return image-level melanoma softmax scores and labels for either model."""
+
     model.eval()
     scores: list[float] = []
     labels: list[int] = []
     for images, targets in loader:
-        queries = to_cpu(model.forward_once(to_device(images, device)))
-        nearest = [
-            torch.cdist(queries, reference)
-            .topk(neighbors, largest=False)
-            .values.mean(dim=1)
-            for reference in references
-        ]
-        scores.extend((nearest[0] - nearest[1]).tolist())
+        logits, _ = model(to_device(images, device))
+        scores.extend(to_cpu(logits.softmax(dim=1)[:, 1]).tolist())
         labels.extend(targets.tolist())
     return np.asarray(scores), np.asarray(labels, dtype=np.int64)
 
@@ -302,8 +216,8 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--target-recall", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--pairs-per-epoch", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--gallery-per-class", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--neighbors", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--contrastive-weight", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--contrastive-margin", type=float, default=argparse.SUPPRESS)
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "mps", "cuda"),
@@ -320,16 +234,15 @@ class TrainingData:
 
     Attributes
     ----------
-    fit, gallery, selection, calibration : torch.utils.data.Subset
+    fit, selection, calibration : torch.utils.data.Subset
         Fitting uses augmented images; all other views are deterministic.
     dataset : ISICImageDataset
-        Deterministic metadata/image view shared by reporting and galleries.
+        Deterministic metadata/image view used for reporting.
     indices : ProtocolIndices
         Frozen role membership. Final indices are never made into a loader here.
     """
 
     fit: Subset
-    gallery: Subset
     selection: Subset
     calibration: Subset
     dataset: ISICImageDataset
@@ -347,7 +260,7 @@ def build_datasets(args: RunConfig) -> TrainingData:
     Returns
     -------
     TrainingData
-        Fitting, gallery, selection and calibration views, without a final loader.
+        Fitting, selection and calibration views, without a final loader.
     """
 
     dataset = ISICImageDataset(args.images_dir, args.metadata_csv)
@@ -355,7 +268,6 @@ def build_datasets(args: RunConfig) -> TrainingData:
     augmented = ISICImageDataset(args.images_dir, args.metadata_csv, training=True)
     return TrainingData(
         fit=Subset(augmented, list(indices.fit)),
-        gallery=Subset(dataset, list(indices.fit)),
         selection=Subset(dataset, list(indices.selection)),
         calibration=Subset(dataset, list(indices.calibration)),
         dataset=dataset,
@@ -363,8 +275,9 @@ def build_datasets(args: RunConfig) -> TrainingData:
     )
 
 
+@torch.no_grad()
 def profile_model(
-    model: BaseCNN | SiameseNetwork,
+    model: MelanomaModel,
     selection_loader: DataLoader,
     device: torch.device,
 ) -> dict[str, object]:
@@ -377,9 +290,9 @@ def profile_model(
     return {
         "parameter_count": count_parameters(model),
         "inference_latency_ms": measure_inference_latency_ms(
-            partial(model_forward, model, device_images), device
+            partial(model, device_images), device
         ),
-        "latency_scope": "model_forward_fixed_selection_batch",
+        "latency_scope": "classifier_and_embedding_forward_fixed_selection_batch",
         "accelerator_memory_bytes": peak_accelerator_memory_bytes(device),
         "accelerator_memory_kind": (
             "cuda_peak_allocated"
@@ -387,17 +300,6 @@ def profile_model(
             else ("mps_current_allocated" if device.type == "mps" else None)
         ),
     }
-
-
-@torch.no_grad()
-def model_forward(
-    model: BaseCNN | SiameseNetwork, images: torch.Tensor
-) -> torch.Tensor:
-    """Run the model's single-image inference path for profiling."""
-
-    if isinstance(model, BaseCNN):
-        return model(images)
-    return model.forward_once(images)
 
 
 def write_predictions(
@@ -463,41 +365,21 @@ def main() -> None:
     calibration_loader = DataLoader(data.calibration, batch_size=args.batch_size)
 
     reset_peak_accelerator_memory(device)
-    model = build_model(args.model, pretrained=args.pretrained).to(device)
+    model = MelanomaModel(pretrained=args.pretrained).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    train_one_epoch: Callable[[], float]
-    score_images: Callable[[DataLoader], tuple[np.ndarray, np.ndarray]]
-    pairs: SiamesePairDataset | None = None
-    gallery_image_names: list[str] = []
-    if isinstance(model, BaseCNN):
-        counts = np.bincount(subset_labels(data.fit), minlength=2)
-        weights = torch.tensor(
-            len(data.fit) / (2 * counts), dtype=torch.float32, device=device
-        )
-        criterion = nn.CrossEntropyLoss(weight=weights)
-        train_loader = DataLoader(data.fit, batch_size=args.batch_size, shuffle=True)
-        train_one_epoch = partial(
-            train_base_epoch, model, train_loader, optimizer, criterion, device
-        )
-        score_images = partial(score_base, model, device=device)
-    else:
-        pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
-        pair_loader = DataLoader(pairs, batch_size=args.batch_size, shuffle=True)
-        gallery = make_gallery(data.gallery, args.gallery_per_class, args.seed)
-        gallery_loader = DataLoader(gallery, batch_size=args.batch_size)
-        gallery_image_names = [
-            data.dataset.samples[index].image_name for index in gallery.indices
-        ]
-        train_one_epoch = partial(
-            train_siamese_epoch, model, pair_loader, optimizer, device
-        )
-        score_images = partial(
-            score_siamese,
-            model,
-            gallery_loader=gallery_loader,
-            device=device,
-            neighbors=args.neighbors,
-        )
+    pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
+    train_loader = DataLoader(
+        pairs,
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    contrastive_weight = args.contrastive_weight if args.model == "siamese" else 0.0
+    objective = {
+        "classification_loss": "cross_entropy",
+        "contrastive_weight": contrastive_weight,
+        "contrastive_margin": args.contrastive_margin,
+    }
 
     best_average_precision = -1.0
     best_epoch = 0
@@ -506,14 +388,22 @@ def main() -> None:
     training_seconds = 0.0
     selection_seconds = 0.0
     for epoch in range(args.epochs):
-        if pairs is not None:
-            pairs.set_epoch(epoch)
+        pairs.set_epoch(epoch)
         phase_started = time.perf_counter()
-        loss = train_one_epoch()
+        losses = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            contrastive_weight,
+            args.contrastive_margin,
+        )
         epoch_training_seconds = time.perf_counter() - phase_started
         training_seconds += epoch_training_seconds
         phase_started = time.perf_counter()
-        selection_scores, selection_labels = score_images(selection_loader)
+        selection_scores, selection_labels = score_model(
+            model, selection_loader, device
+        )
         epoch_selection_seconds = time.perf_counter() - phase_started
         selection_seconds += epoch_selection_seconds
         average_precision = float(
@@ -522,7 +412,7 @@ def main() -> None:
         history.append(
             {
                 "epoch": float(epoch + 1),
-                "train_loss": loss,
+                **losses,
                 "selection_average_precision": average_precision,
                 "training_seconds": epoch_training_seconds,
                 "selection_seconds": epoch_selection_seconds,
@@ -530,7 +420,9 @@ def main() -> None:
         )
         plot_training_history(history, run_directory / "training.svg")
         print(
-            f"Epoch {epoch + 1}/{args.epochs}: loss={loss:.4f}, "
+            f"Epoch {epoch + 1}/{args.epochs}: loss={losses['train_loss']:.4f}, "
+            f"CE={losses['classification_loss']:.4f}, "
+            f"contrastive={losses['contrastive_loss']:.4f}, "
             f"selection AP={average_precision:.4f}",
             flush=True,
         )
@@ -541,10 +433,12 @@ def main() -> None:
 
     model.load_state_dict(best_state)
     phase_started = time.perf_counter()
-    selection_scores, selection_labels = score_images(selection_loader)
+    selection_scores, selection_labels = score_model(model, selection_loader, device)
     selection_seconds += time.perf_counter() - phase_started
     phase_started = time.perf_counter()
-    calibration_scores, calibration_labels = score_images(calibration_loader)
+    calibration_scores, calibration_labels = score_model(
+        model, calibration_loader, device
+    )
     decision_rule = select_triage_rule(
         calibration_labels, calibration_scores, args.target_recall
     )
@@ -568,11 +462,17 @@ def main() -> None:
         "device": str(device),
         "seed": args.seed,
         "run_name": args.run_name,
-        "score_kind": (
-            "melanoma_softmax_score"
-            if isinstance(model, BaseCNN)
-            else "benign_minus_melanoma_distance"
-        ),
+        "score_kind": "melanoma_softmax_score",
+        "objective": objective,
+        "training_budget": {
+            "batch_size_pairs": args.batch_size,
+            "images_per_full_training_batch": 2 * args.batch_size,
+            "pairs_per_epoch": len(pairs),
+            "image_presentations_per_epoch": 2 * len(pairs),
+            "optimizer_steps_per_epoch": len(train_loader),
+            "total_image_presentations": 2 * len(pairs) * args.epochs,
+            "total_optimizer_steps": len(train_loader) * args.epochs,
+        },
         "protocol": identity,
         "partitions": partition_summary(data.dataset, data.indices),
         "history": history,
@@ -599,8 +499,8 @@ def main() -> None:
         "preprocessing": preprocessing,
         "protocol": identity,
         "fit_patient_ids": fit_patient_ids,
-        "gallery_image_names": gallery_image_names,
-        "scoring": {"neighbors": args.neighbors if gallery_image_names else None},
+        "score_kind": "melanoma_softmax_score",
+        "objective": objective,
         "decision_rule": decision_rule,
         "decision_rule_partition": "calibration",
         "best_epoch": best_epoch,

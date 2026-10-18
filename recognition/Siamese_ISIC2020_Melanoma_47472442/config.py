@@ -33,15 +33,20 @@ class RunConfig:
     run_name : str
         Unique output directory name.
     epochs, batch_size : int
-        Optimisation epochs and images or pairs per batch.
+        Optimisation epochs and pairs per training batch. Scoring uses
+        ``batch_size`` individual images per batch.
     learning_rate : float
         Adam learning rate.
     seed : int
         Model initialisation and sampling seed.
     target_recall : float
         Calibration target for the melanoma threshold.
-    pairs_per_epoch, gallery_per_class, neighbors : int
-        Siamese pair budget, references per class and neighbours per score.
+    pairs_per_epoch : int
+        Paired-image presentations per epoch for both configurations.
+    contrastive_weight : float
+        Metric-loss multiplier for the Siamese objective; baseline uses zero.
+    contrastive_margin : float
+        Minimum target distance for different-class pairs.
     device : {"auto", "cpu", "mps", "cuda"}, default="auto"
         ``"auto"`` prefers CUDA, then MPS, then CPU.
     """
@@ -59,8 +64,8 @@ class RunConfig:
     seed: int = 42
     target_recall: float = 0.9
     pairs_per_epoch: int = 4096
-    gallery_per_class: int = 100
-    neighbors: int = 5
+    contrastive_weight: float = 1.0
+    contrastive_margin: float = 1.0
     device: DeviceName = "auto"
 
 

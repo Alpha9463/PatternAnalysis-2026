@@ -6,9 +6,8 @@ Run from the repository root after a completed training run::
       recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
       --checkpoint data/runs/resnet18_baseline_seed42/checkpoint.pt
 
-This command never trains a model, changes a patient split, resamples a
-Siamese gallery, or chooses a new decision threshold. It applies the
-saved policy. Prediction defaults to calibration; final patients require
+This command applies the saved classifier and decision policy without
+training, changing patient splits, or selecting a new threshold. Prediction defaults to calibration; final patients require
 ``--partition final --evaluate-final --evaluation-note``.
 """
 
@@ -23,7 +22,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
@@ -32,9 +30,7 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     repository_root,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
-    BaseCNN,
-    SiameseNetwork,
-    build_model,
+    MelanomaModel,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.protocol import (
     load_protocol_manifest,
@@ -45,8 +41,7 @@ from recognition.Siamese_ISIC2020_Melanoma_47472442.provenance import (
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.train import (
     classification_metrics,
-    score_base,
-    score_siamese,
+    score_model,
 )
 from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
     apply_triage_rule,
@@ -132,7 +127,7 @@ def parse_prediction_args(argv: Sequence[str] | None = None) -> argparse.Namespa
 
 def load_run_for_prediction(
     checkpoint_path: Path, device: torch.device
-) -> tuple[BaseCNN | SiameseNetwork, dict[str, Any]]:
+) -> tuple[MelanomaModel, dict[str, Any]]:
     """Load a saved model through the project model factory in evaluation mode.
 
     Parameters
@@ -144,14 +139,14 @@ def load_run_for_prediction(
 
     Returns
     -------
-    BaseCNN or SiameseNetwork
+    MelanomaModel
         Reloaded ResNet-18 model in evaluation mode.
     dict of str to object
         Saved checkpoint contents.
     """
 
     checkpoint = load_checkpoint(checkpoint_path, map_location=device)
-    model = build_model(checkpoint["model_name"], pretrained=False)
+    model = MelanomaModel(pretrained=False)
     model.load_state_dict(checkpoint["state_dict"])
     return model.to(device).eval(), checkpoint
 
@@ -281,17 +276,17 @@ def _validate_saved_run(
     if (
         checkpoint["protocol"] != metrics["protocol"]
         or checkpoint["decision_rule"] != metrics["decision_rule"]
+        or checkpoint["objective"] != metrics["objective"]
     ):
         raise ValueError("Checkpoint and metrics refer to different experiments")
 
 
 @dataclass(frozen=True)
 class PredictionData:
-    """Deterministic prediction view and the only eligible reference indices."""
+    """Deterministic image view for one saved patient role."""
 
     dataset: ISICImageDataset
     subset: Subset
-    fit_indices: tuple[int, ...]
     partition: str
 
 
@@ -315,7 +310,7 @@ def build_prediction_data(
     Returns
     -------
     PredictionData
-        Verified prediction subset and fitting-only gallery eligibility.
+        Prediction subset checked against the saved fitting identity.
     """
 
     saved_protocol = checkpoint["protocol"]
@@ -330,44 +325,8 @@ def build_prediction_data(
     return PredictionData(
         dataset,
         Subset(dataset, list(getattr(indices, partition))),
-        indices.fit,
         partition,
     )
-
-
-def _rebuild_siamese_gallery(
-    checkpoint: Mapping[str, Any],
-    dataset: ISICImageDataset,
-    fit_indices: Sequence[int],
-) -> tuple[Subset, int]:
-    """Rebuild the exact train-only gallery and its saved neighbour count."""
-
-    indices_by_name = {
-        dataset.samples[index].image_name: index for index in fit_indices
-    }
-    gallery = Subset(
-        dataset, [indices_by_name[name] for name in checkpoint["gallery_image_names"]]
-    )
-    return gallery, checkpoint["scoring"]["neighbors"]
-
-
-def _predict_scores(
-    model: BaseCNN | SiameseNetwork,
-    checkpoint: Mapping[str, Any],
-    dataset: ISICImageDataset,
-    subset: Subset,
-    fit_indices: Sequence[int],
-    batch_size: int,
-    device: torch.device,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Score the chosen patient role using the checkpoint's frozen context."""
-
-    loader = DataLoader(subset, batch_size=batch_size)
-    if isinstance(model, BaseCNN):
-        return score_base(model, loader, device)
-    gallery, neighbors = _rebuild_siamese_gallery(checkpoint, dataset, fit_indices)
-    gallery_loader = DataLoader(gallery, batch_size=batch_size)
-    return score_siamese(model, loader, gallery_loader, device, neighbors)
 
 
 def _make_predictions(
@@ -419,16 +378,6 @@ def _write_predictions(
             writer.writerows(rows)
 
 
-def _score_label(checkpoint: Mapping[str, Any]) -> str:
-    """Describe the saved model score without treating it as calibrated by default."""
-
-    return (
-        "Melanoma softmax score"
-        if checkpoint["model_name"] == "base"
-        else "Melanoma similarity score"
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> None:
     """Reload a frozen run and explicitly score its permitted patient role."""
 
@@ -460,19 +409,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         "final_evaluation_authorised": bool(args.evaluate_final),
         "evaluation_note": args.evaluation_note,
         "decision_rule": decision_rule,
+        "objective": checkpoint["objective"],
+        "score_kind": checkpoint["score_kind"],
         "device": str(device),
         "batch_size": args.batch_size,
     }
     evaluation_path = output_dir / "evaluation.json"
     _write_evaluation(evaluation_path, evaluation)
-    scores, labels = _predict_scores(
-        model,
-        checkpoint,
-        data.dataset,
-        data.subset,
-        data.fit_indices,
-        args.batch_size,
-        device,
+    scores, labels = score_model(
+        model, DataLoader(data.subset, batch_size=args.batch_size), device
     )
     predictions = _make_predictions(
         data.dataset, data.subset, labels.tolist(), scores.tolist(), decision_rule
@@ -482,7 +427,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     figures = create_prediction_figures(
         predictions,
         decision_rule,
-        _score_label(checkpoint),
+        "Melanoma softmax score",
         output_dir,
         data.partition,
     )

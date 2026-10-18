@@ -159,7 +159,8 @@ class SiamesePairDataset(Dataset):
     -----
     Pair members always come from different patients. Call ``set_epoch``
     before each training epoch to draw a new deterministic set of pairs.
-    Targets are 1 for matching labels and 0 for different labels.
+    Each image's class label is returned for classification; matching labels
+    identify positive pairs for the contrastive objective.
     """
 
     def __init__(
@@ -198,8 +199,8 @@ class SiamesePairDataset(Dataset):
 
     def __getitem__(
         self, index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Load a pair and its same-label target.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Load a cross-patient image pair and both class labels.
 
         Parameters
         ----------
@@ -212,8 +213,10 @@ class SiamesePairDataset(Dataset):
             First RGB image.
         second : torch.Tensor
             Second RGB image from a different patient.
-        same_label : torch.Tensor
-            Float32 scalar, 1 for matching labels and 0 otherwise.
+        first_label : torch.Tensor
+            First image's int64 class label: benign (0) or melanoma (1).
+        second_label : torch.Tensor
+            Second image's int64 class label: benign (0) or melanoma (1).
         """
 
         rng = random.Random(self.seed + self.epoch * self.pairs_per_epoch + index)
@@ -227,9 +230,9 @@ class SiamesePairDataset(Dataset):
         second_patient = rng.choice(possible_second)
         first_index = rng.choice(self.by_label[first_label][first_patient])
         second_index = rng.choice(self.by_label[second_label][second_patient])
-        first, _ = self.dataset[first_index]
-        second, _ = self.dataset[second_index]
-        return first, second, torch.tensor(float(same), dtype=torch.float32)
+        first, first_label_tensor = self.dataset[first_index]
+        second, second_label_tensor = self.dataset[second_index]
+        return first, second, first_label_tensor, second_label_tensor
 
 
 def main() -> None:

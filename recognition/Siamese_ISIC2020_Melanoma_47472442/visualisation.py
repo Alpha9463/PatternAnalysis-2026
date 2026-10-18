@@ -71,7 +71,8 @@ def plot_training_history(
     ----------
     history : list of mapping
         Per-epoch records with ``epoch``, ``train_loss``, and
-        ``selection_average_precision`` fields.
+        ``selection_average_precision`` fields. Classification and raw
+        contrastive losses are plotted when recorded.
     output_path : pathlib.Path
         SVG destination. Parent directories are created when needed.
 
@@ -80,32 +81,31 @@ def plot_training_history(
     pathlib.Path
         The written SVG path.
 
-    Raises
-    ------
-    ValueError
-        If history is empty or lacks the required numeric values.
     """
 
     metric_label = "Selection average precision"
-    try:
-        epochs = [int(entry["epoch"]) for entry in history]
-        losses = [float(entry["train_loss"]) for entry in history]
-        average_precision = [
-            float(entry["selection_average_precision"]) for entry in history
-        ]
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            "History needs numeric epoch, train_loss, and selection_average_precision"
-        ) from error
-    if not epochs:
-        raise ValueError("History must contain at least one epoch")
+    epochs = [int(entry["epoch"]) for entry in history]
+    losses = [entry["train_loss"] for entry in history]
+    average_precision = [entry["selection_average_precision"] for entry in history]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure, loss_axis = plt.subplots(figsize=(7.2, 4.5))
     average_precision_axis = loss_axis.twinx()
     loss_line = loss_axis.plot(
-        epochs, losses, "o-", color="#1f77b4", label="Training loss"
+        epochs, losses, "o-", color="#1f77b4", label="Total training loss"
     )
+    for field, label, color in (
+        ("classification_loss", "Cross-entropy", "#2ca02c"),
+        ("contrastive_loss", "Raw contrastive loss", "#9467bd"),
+    ):
+        if field in history[0]:
+            loss_line += loss_axis.plot(
+                epochs,
+                [entry[field] for entry in history],
+                "--",
+                color=color,
+                label=label,
+            )
     average_precision_line = average_precision_axis.plot(
         epochs,
         average_precision,
@@ -123,7 +123,7 @@ def plot_training_history(
     loss_axis.grid(axis="y", alpha=0.3)
     loss_axis.legend(
         loss_line + average_precision_line,
-        ("Training loss", metric_label),
+        [str(line.get_label()) for line in loss_line + average_precision_line],
         loc="upper center",
         bbox_to_anchor=(0.5, -0.18),
         ncol=2,
