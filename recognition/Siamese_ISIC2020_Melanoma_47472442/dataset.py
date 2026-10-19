@@ -1,7 +1,7 @@
 """Lazy RGB image loading and patient-separated pairs for ResNet-18.
 
 Images and GroundTruth_v2 metadata default to repository ``data/``. Every
-image uses the ImageNet resize, centre crop and normalisation preset.
+image uses explicit resize, centre crop and RGB normalisation transforms.
 """
 
 import argparse
@@ -15,10 +15,12 @@ from typing import cast
 import torch
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset, Subset
-from torchvision.models import ResNet18_Weights
+from torchvision import transforms
 
 
 DEFAULT_METADATA_NAME = "ISIC_2020_Training_GroundTruth_v2.csv"
+_MEAN = (0.485, 0.456, 0.406)
+_STD = (0.229, 0.224, 0.225)
 
 
 def repository_root() -> Path:
@@ -36,16 +38,15 @@ def default_data_dir() -> Path:
 def model_preprocessing() -> dict[str, object]:
     """Describe the fixed ResNet-18 input pipeline saved with each run."""
 
-    transform = ResNet18_Weights.IMAGENET1K_V1.transforms()
     return {
-        "image_size": transform.crop_size[0],
+        "image_size": 224,
         "color_mode": "RGB",
-        "resize_shorter_side": transform.resize_size[0],
-        "resize": transform.interpolation.value,
-        "antialias": transform.antialias,
+        "resize_shorter_side": 256,
+        "resize": "bilinear",
+        "antialias": True,
         "crop": "center",
         "scaling": "float32_0_1",
-        "normalization": {"mean": transform.mean, "std": transform.std},
+        "normalization": {"mean": list(_MEAN), "std": list(_STD)},
         "exif_transpose": True,
         "layout": "CHW",
         "fitting_augmentation": ["horizontal_flip_0.5", "vertical_flip_0.5"],
@@ -63,7 +64,7 @@ class ISICSample:
 
 
 class ISICImageDataset(Dataset):
-    """Load ISIC RGB images with the fixed ResNet-18 preprocessing preset.
+    """Load ISIC RGB images with fixed resize, crop and normalisation.
 
     Parameters
     ----------
@@ -94,7 +95,14 @@ class ISICImageDataset(Dataset):
             else next(default_data_dir().rglob(DEFAULT_METADATA_NAME))
         )
         self.training = training
-        self.transform = ResNet18_Weights.IMAGENET1K_V1.transforms()
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize(256, antialias=True),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(_MEAN, _STD),
+            ]
+        )
         image_paths = {
             path.stem: path
             for path in self.images_dir.rglob("*")
@@ -140,7 +148,9 @@ class ISICImageDataset(Dataset):
                 image = ImageOps.mirror(image)
             if random.random() < 0.5:
                 image = ImageOps.flip(image)
-        return self.transform(image), torch.tensor(sample.label, dtype=torch.long)
+        return cast(torch.Tensor, self.transform(image)), torch.tensor(
+            sample.label, dtype=torch.long
+        )
 
 
 class SiamesePairDataset(Dataset):

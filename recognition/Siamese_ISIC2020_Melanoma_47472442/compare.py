@@ -38,7 +38,6 @@ METRICS = (
 )
 DIAGNOSTIC_SETTINGS = ("target_melanoma_recall", "references_per_class", "neighbors")
 TRAINING_SETTINGS = (
-    "pretrained",
     "epochs",
     "batch_size",
     "learning_rate",

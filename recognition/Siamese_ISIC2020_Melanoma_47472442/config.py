@@ -24,8 +24,6 @@ class RunConfig:
     ----------
     model : {"base", "siamese"}, default="base"
         Direct classification or contrastive embedding learning.
-    pretrained : bool, default=True
-        Initialise ResNet-18 with ImageNet weights.
     images_dir, metadata_csv : pathlib.Path or None
         Input paths; ``None`` finds the dataset under repository ``data/``.
     output_dir, protocol_manifest : pathlib.Path
@@ -52,12 +50,11 @@ class RunConfig:
     """
 
     model: ModelName = "base"
-    pretrained: bool = True
     images_dir: Path | None = None
     metadata_csv: Path | None = None
     output_dir: Path = default_data_dir() / "runs"
     protocol_manifest: Path = default_data_dir() / "splits" / "isic_protocol.json"
-    run_name: str = "resnet18_baseline_seed42"
+    run_name: str = "resnet18_baseline_scratch_seed42"
     epochs: int = 5
     batch_size: int = 16
     learning_rate: float = 1e-4

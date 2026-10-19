@@ -4,9 +4,9 @@
 
 This project investigates whether Siamese metric learning improves melanoma triage from dermoscopic images compared with a classification-only convolutional neural network (CNN). The intended user reviews suspicious lesions and uncertain predictions. The engineering question is whether an embedding-based comparison with labelled fitting references identifies errors and reduces review workload at comparable melanoma sensitivity and acceptable local computational cost.
 
-Both ImageNet-initialised ResNet-18 models completed 30-epoch runs on Apple MPS using the same architecture, patient protocol, paired-image inputs and optimisation budget. The Siamese model achieved higher selection average precision (0.2739 versus 0.2429), but its paired patient interval includes no difference. The baseline achieved higher AUROC and captured more melanomas with fewer reviews at the calibration-derived operating points. Reference disagreement produced exactly the same referral decisions as confidence alone. These results favour the classification-only baseline for the current triage policy while leaving the value of weaker metric supervision unresolved.
+The earlier ImageNet-initialised runs are retained below as historical development evidence. Their scores, figures and conclusions do not establish the current model's assessment performance.
 
-The dataset contains fewer than 2% melanoma images, so raw accuracy can conceal poor detection. The report therefore considers per-class precision and recall, macro-F1, AUROC, melanoma precision–recall performance, actual review workload and computational cost. All current results describe selection or calibration patients. Final evaluation remains pending. The prototype is an image-only research system without clinical validation or measured human diagnostic performance.
+The dataset contains fewer than 2% melanoma images, so raw accuracy can conceal poor detection. The report therefore considers per-class precision and recall, macro-F1, AUROC, melanoma precision–recall performance, actual review workload and computational cost. All reported results describe historical selection or calibration patients. From-scratch training and final evaluation remain pending. The prototype is an image-only research system without clinical validation or measured human diagnostic performance.
 
 ## Methodology
 
@@ -14,7 +14,7 @@ The dataset contains fewer than 2% melanoma images, so raw accuracy can conceal 
 
 The study uses the labelled training images from the [SIIM-ISIC 2020 Challenge dataset](https://github.com/ImageMarkup/isic-challenge-2020/blob/master/index.md), described by [Rotemberg et al.](https://doi.org/10.1038/s41597-021-00815-z). The metadata audit identified 33,126 images from 2,056 patients, including 584 melanoma images (1.76%). All 425 published duplicate pairs share a patient identifier and label.
 
-Images are loaded lazily, corrected for EXIF orientation and converted to RGB. The current loader uses the [official ResNet-18 ImageNet preprocessing preset](https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html): bilinear resize of the shorter side to 256 pixels, centre crop to 224 × 224, scaling to [0, 1], and channel normalisation with mean (0.485, 0.456, 0.406) and standard deviation (0.229, 0.224, 0.225). Horizontal and vertical flips are applied during fitting only. Selection, calibration and inference use deterministic preprocessing independent of the true image label. Lazy loading avoids retaining the image archive in memory.
+Images are loaded lazily, corrected for EXIF orientation and converted to RGB. Explicit transforms apply bilinear resize of the shorter side to 256 pixels, centre crop to 224 × 224, scaling to [0, 1], and channel normalisation with mean (0.485, 0.456, 0.406) and standard deviation (0.229, 0.224, 0.225). These fixed preprocessing constants match the earlier pipeline; they do not load learned model parameters or fetch weights. Horizontal and vertical flips are applied during fitting only. Selection, calibration and inference use deterministic preprocessing independent of the true image label. Lazy loading avoids retaining the image archive in memory.
 
 The patient assignments are frozen in `data/splits/isic_protocol.json`. A deterministic recipe separates a 70% fitting pool, 15% tuning pool and 15% development population using seed 42. It reserves 20% of the fitting pool for final evaluation using seed 20261007 and divides the tuning patients equally between selection and calibration using seed 20261008. Each division stratifies patients by whether any of their images contains melanoma. Every image from a patient remains in the same role; image fractions differ from patient fractions because patients contribute different numbers of lesions.
 
@@ -54,9 +54,9 @@ where $s=1$ for matching labels and $d$ is the distance between normalised embed
 
 Each epoch draws 4,096 pairs, alternating same-class and different-class examples and always choosing different patients within a pair. First-image labels are sampled uniformly, with patients sampled within each label. Fitting image classes are therefore approximately balanced, and ordinary cross-entropy is used without additional inverse-frequency weights. Evaluation retains natural prevalence. Dedicated generators give both objectives the same sampling and shuffle streams for a fixed seed.
 
-The two completed 30-epoch runs use seed 42, Adam at learning rate 0.0001 and batch size 16 pairs. Each full training forward contains 32 images. The matched budget is 8,192 image presentations and 256 optimiser steps per epoch, totalling 245,760 presentations and 7,680 steps. Scoring uses batches of 16 individual images. There is currently no learning-rate schedule or early stopping; the checkpoint with highest selection average precision is retained throughout the full budget.
+The current configurations use seed 42, Adam at learning rate 0.0001 and batch size 16 pairs, with five epochs for initial pilots. Each full training forward contains 32 images. Each epoch supplies 8,192 image presentations and 256 optimiser steps. The historical 30-epoch budget totalled 245,760 presentations and 7,680 steps, but its suitability for random initialisation has not been established. Scoring uses batches of 16 individual images. There is currently no learning-rate schedule or early stopping; the checkpoint with highest selection average precision is retained throughout the chosen budget.
 
-Initialisation uses `ResNet18_Weights.IMAGENET1K_V1`, replacing the ImageNet classifier with the projection and binary head. The draft brief's Siamese entry does not prohibit ImageNet initialisation or require training from scratch. Its use here follows that interpretation; no separate teaching-team approval is recorded. The weight source is attributed, and `--no-pretrained` supports random initialisation with identical preprocessing.
+ResNet-18 is used solely as an architecture, with its original classification layer replaced by the projection and binary head. `MelanomaModel()` always calls `resnet18(weights=None)`, so training starts from fresh weights without an ImageNet download or checkpoint warm start.
 
 ### Checkpoint Selection, Calibration and Referral
 
@@ -68,7 +68,7 @@ Both diagnostic policies always route classifier-positive images for review. Add
 
 ### Statistical Comparison
 
-The completed comparison uses 2,000 paired patient-cluster bootstrap draws, stratified by whether a patient has any melanoma, with bootstrap seed 42. Each draw retains all images from sampled patients, including repeated draws, and evaluates both models on the same patient sample. The approach follows the cluster-resampling principle discussed by [Field and Welsh](https://doi.org/10.1111/j.1467-9868.2007.00593.x).
+The historical ImageNet comparison uses 2,000 paired patient-cluster bootstrap draws, stratified by whether a patient has any melanoma, with bootstrap seed 42. Each draw retains all images from sampled patients, including repeated draws, and evaluates both models on the same patient sample. The approach follows the cluster-resampling principle discussed by [Field and Welsh](https://doi.org/10.1111/j.1467-9868.2007.00593.x).
 
 The resulting 95% percentile intervals condition on one trained seed pair, its selected checkpoints, calibration rules and observed patient-stratum counts. They exclude training and calibration uncertainty and do not correct optimism from checkpoint or model selection. Differences are computed within each draw. Other metrics supplement the primary selection-AP comparison; no multi-seed conclusion is available.
 
@@ -76,15 +76,17 @@ The resulting 95% percentile intervals condition on one trained seed pair, its s
 
 The feasibility check-off is complete. The prototype's acceptance criteria cover patient separation, image-level classification, calibration-based triage, three to five failure autopsies and local resource use. The task brief suggests test accuracy around 0.80 and also requires per-class metrics, PR curves, a baseline and uncertainty analysis. The conventional accuracy result and the higher-recall policy are therefore reported separately.
 
-The initial local budget was a two-hour MPS pilot at 224 × 224 resolution with process memory below 24 GiB. The five-epoch ResNet pilots completed in 28.12 minutes for the baseline and 28.19 minutes for the Siamese model, with process peaks of 1.225 and 1.194 GiB. The subsequent 30-epoch experiments took approximately 154 minutes each: they extend beyond the pilot's two-hour allowance, while remaining practical local runs. Their measured process peaks remained below 24 GiB. Exact MPS peak accelerator allocation is unavailable and is not inferred from the current-allocation snapshot.
+The initial local budget was a two-hour MPS pilot at 224 × 224 resolution with process memory below 24 GiB. Historical ImageNet-initialised five-epoch pilots completed in 28.12 minutes for the baseline and 28.19 minutes for the Siamese model, with process peaks of 1.225 and 1.194 GiB. Their subsequent 30-epoch experiments took approximately 154 minutes each. These observations establish earlier local execution evidence, not convergence or detection performance from scratch. Fresh pilots must reassess the training budget under the revised constraint. Exact MPS peak accelerator allocation is unavailable and is not inferred from a current-allocation snapshot.
 
-The principal remaining risks are the small number of melanomas, selection optimism, overconfident incorrect predictions and an ineffective referral policy. The measured reference search is inexpensive after encoding, but does not currently improve capture or workload over confidence. The current engineering recommendation favours the baseline's observed triage performance. Weaker metric supervision and repeated seeds remain proposed investigations, with final patients reserved until all choices are frozen.
+The principal remaining risks are the small number of melanomas, selection optimism, overconfident incorrect predictions and an ineffective referral policy. The historical reference search was inexpensive after encoding but did not improve capture or workload over confidence. A current engineering recommendation requires a matched from-scratch baseline and Siamese experiment. The patient protocol remains frozen, with final patients reserved until all choices are fixed.
 
-## Results and Discussion
+## Historical ImageNet Results and Discussion
+
+All ResNet tables and figures in this section describe the earlier ImageNet-initialised experiments. They are retained for traceability and are excluded from evidence of compliance with the from-scratch requirement. No from-scratch classification, referral or resource results are claimed.
 
 ### Completed Evidence and Historical Context
 
-The primary results use `resnet18_baseline_30ep_seed42` and `resnet18_siamese_30ep_seed42`, their `diagnostics/selection/` outputs and `data/comparisons/resnet18_30ep_selection_seed42/`. Saved prediction identities, patient IDs and labels agree with the frozen protocol and ground truth. Classification metrics were recomputed from saved CSVs, diagnostic predictions agree with training artifacts, and the statistical comparison's input hashes match the current files. Neither current run has evaluated final patients.
+The historical ResNet results use `resnet18_baseline_30ep_seed42` and `resnet18_siamese_30ep_seed42`, their `diagnostics/selection/` outputs and `data/comparisons/resnet18_30ep_selection_seed42/`. Saved prediction identities, patient IDs and labels agree with the frozen protocol and ground truth. Classification metrics were recomputed from saved CSVs, diagnostic predictions agree with training artifacts, and the statistical comparison's input hashes match the current files. Neither historical ResNet run has evaluated final patients.
 
 Earlier five-epoch compact models remain historical development evidence. Their selection AP was 0.0628 for the CNN and 0.0555 for the Siamese model, with AUROC 0.7457 and 0.7964. The compact CNN used weighted cross-entropy; the compact Siamese model classified using distances to fitting references. They differed in architecture and image budget, so they do not isolate the effect of the loss. The current implementation supports ResNet-18 only; the historical scores and figures remain available, but their checkpoints are not supported by the current model definitions.
 
@@ -115,11 +117,11 @@ The Siamese model's higher AP has not translated into a better calibrated operat
 
 ![Classification-only ResNet-18 selection ROC and PR curves](figures/resnet18_baseline_roc_pr.svg)
 
-*Figure 1. Baseline selection curves. The marked operating point uses the calibration-derived threshold.*
+*Figure 1. Historical ImageNet experiment. Baseline selection curves. The marked operating point uses the calibration-derived threshold.*
 
 ![Joint Siamese ResNet-18 selection ROC and PR curves](figures/resnet18_siamese_roc_pr.svg)
 
-*Figure 2. Siamese selection curves for the same images and prevalence, using the classifier's softmax score.*
+*Figure 2. Historical ImageNet experiment. Siamese selection curves for the same images and prevalence, using the classifier's softmax score.*
 
 ### Conventional Accuracy and the Calibrated Operating Point
 
@@ -153,11 +155,11 @@ The five-epoch ResNet pilots selected epochs 3 and 4, with AP 0.2189 and 0.2406.
 
 ![Classification-only ResNet-18 training history](figures/resnet18_baseline_training.svg)
 
-*Figure 3. Baseline history over 30 epochs; the retained checkpoint has the highest selection AP at epoch 10.*
+*Figure 3. Historical ImageNet experiment. Baseline history over 30 epochs; the retained checkpoint has the highest selection AP at epoch 10.*
 
 ![Joint Siamese ResNet-18 training history](figures/resnet18_siamese_training.svg)
 
-*Figure 4. Siamese history over 30 epochs; the retained checkpoint occurs at epoch 7.*
+*Figure 4. Historical ImageNet experiment. Siamese history over 30 epochs; the retained checkpoint occurs at epoch 7.*
 
 Baseline training cross-entropy fell from 0.4948 to 0.0204, while AP at epoch 30 was only 0.1332. Siamese total loss fell from 0.8295 to 0.0378, while epoch-30 AP was 0.2197. These histories are consistent with overfitting or unstable generalisation after early improvement. They do not isolate the objective, sampling, preprocessing or lack of regularisation as the cause. Additional epochs alone are not supported by the current evidence.
 
@@ -176,7 +178,7 @@ The AP interval spans zero, so this comparison does not establish a reliable Sia
 
 ![Paired patient comparison of the two ResNet-18 models](figures/resnet18_comparison.svg)
 
-*Figure 5. Saved seed-42 comparison with conditional patient percentile intervals. Binary metrics use the calibration-derived thresholds.*
+*Figure 5. Historical ImageNet experiment. Saved seed-42 comparison with conditional patient percentile intervals. Binary metrics use the calibration-derived thresholds.*
 
 ### Referral Behaviour and Review Workload
 
@@ -195,7 +197,7 @@ Referrals add 415 benign reviews without rescuing another melanoma for the basel
 
 ![Siamese selection referral workload and capture](figures/resnet18_siamese_referrals.svg)
 
-*Figure 6. Descriptive selection workload curves. The confidence and reference curves overlap within each model; their frozen operating results are given in the table.*
+*Figure 6. Historical ImageNet experiment. Descriptive selection workload curves. The confidence and reference curves overlap within each model; their frozen operating results are given in the table.*
 
 Reference disagreement has an apparently strong overall error-detection AUROC of 0.9858 for the baseline and 0.9870 for the Siamese model. These are not melanoma-classification AUROCs. Every classifier-negative selection image has five benign nearest neighbours, making its disagreement statistic zero. Within this negative group, reference error-detection AUROC is therefore 0.5 for both models. The high aggregate error score largely identifies false-positive flags that already enter review; it provides no ranking signal to rescue additional false negatives. The entire confidence and reference workload curves are identical, not just their chosen operating points.
 
@@ -213,13 +215,13 @@ The saved Siamese montage contains five actual binary errors, including a false 
 
 ![Five Siamese errors with their nearest fitting references](figures/resnet18_siamese_failures.svg)
 
-*Figure 7. Each query appears beside three of its five nearest fitting references. Labels and neighbour statistics are diagnostic evidence, not independent confirmation of the model's decision.*
+*Figure 7. Historical ImageNet experiment. Each query appears beside three of its five nearest fitting references. Labels and neighbour statistics are diagnostic evidence, not independent confirmation of the model's decision.*
 
 All eight Siamese false negatives have five benign neighbours. The confidence and reference policies rescue the same one image and leave seven unreviewed. Retrieved examples therefore explain which fitting cases are nearby, but cannot currently be presented as an independent safeguard against incorrect clearing. Visual inspection alone does not prove that hair, ruler markings, colour or crop caused a prediction.
 
 ![Siamese fitting-reference and selection embedding projection](figures/resnet18_siamese_embeddings.svg)
 
-*Figure 8. PCA fitted on the 200 fitting references and applied to selection embeddings. Query labels affect colouring only.*
+*Figure 8. Historical ImageNet experiment. PCA fitted on the 200 fitting references and applied to selection embeddings. Query labels affect colouring only.*
 
 The first PCA component explains 98.5% of fitting-reference variation for the Siamese model, versus 93.6% for the baseline. Most variation is concentrated along one discrimination direction. This is not proof of defective embeddings in a binary task, and two-dimensional geometry can hide other structure. However, the clear fitting-reference endpoints coexist with selection melanomas among benign embeddings. Tight fitting clusters have not supplied a useful disagreement-based referral signal on these unseen patients.
 
@@ -246,13 +248,13 @@ The matched architecture and image budget make this a controlled objective compa
 
 Process RSS is the operating system's process-lifetime high-water mark. The MPS number is a current tensor-allocation snapshot, excluding allocator caches and total Metal-driver allocation. It is not a peak, and it must not be added to RSS on Apple's unified memory. Full 30-epoch runs exceed the original two-hour pilot allowance; the five-epoch pilots met it. Both measured process peaks remain well below the 24 GiB criterion.
 
-## Conclusions and Next Experiment
+## Conclusions and From-Scratch Restart
 
-The completed controlled comparison establishes practical local training and evaluation, but no demonstrated triage advantage from the current Siamese objective. Its selection AP is higher, with an interval spanning zero difference, while the baseline has better AUROC, melanoma capture and workload at the saved operating policies. Neighbour disagreement adds no referral value over confidence, despite its high aggregate error-detection AUROC. The classification-only baseline is the stronger current engineering choice for this operating policy, with a remaining missed melanoma and substantial false-positive burden.
+The historical ImageNet comparison established local execution and an unresolved metric-learning question. Its higher Siamese AP had an interval spanning zero difference, while the baseline had better AUROC, melanoma capture and workload at the saved operating policies. Neighbour disagreement added no referral value over confidence. These findings remain development context and do not establish the performance or preferred objective when training from scratch.
 
-The next experiment isolates contrastive weight: compare 0.1 and 0.25 with the existing weight-0 and weight-1 controls, retaining seed 42, 30 epochs, margin, sampling and preprocessing. These are proposed screening values, not literature-established optima. Selection AP remains the primary metric, with per-class detection, referral workload and cost reported alongside it. Reusing selection patients for this bounded search adds optimism; repeated paired seeds and frozen final evaluation remain necessary before a broader claim.
+The next experiments are fresh classification-only and Siamese pilots with weights 0 and 1, identical random initialisation seeds, patient roles and training budgets. Five-epoch pilots assess initial learning and local execution; they do not establish convergence. Their histories will inform the next matched training budget. Any later weight-0.1 or weight-0.25 experiment requires a from-scratch control with matching settings; the existing ImageNet baseline cannot serve as that control. Selection AP remains the primary metric, with per-class detection, referral workload and cost reported alongside it. Repeated paired seeds and frozen final evaluation remain necessary before a broader claim.
 
-Further generalisation changes, if needed, include modest augmentation, weight decay and a decaying learning rate. The [ISIC winning solution](https://arxiv.org/html/2010.05351) provides a primary example of augmentation and scheduled fine-tuning, but also uses external data and a large ensemble, so its AUROC is not a directly transferable accuracy target. [Supervised Contrastive Learning](https://arxiv.org/html/2004.11362) motivates a later comparison of separate classification and metric representations; its results do not guarantee improvement on this patient protocol. Any revised recipe will retain a matched classification-only control. If metric learning continues to add no useful referral evidence, the final recommendation will state that result directly.
+Further generalisation changes, if needed, include modest augmentation, weight decay and a decaying learning rate. The [ISIC winning solution](https://arxiv.org/html/2010.05351) provides literature context for augmentation and scheduled training, but its pretrained ensemble and external data do not supply an admissible recipe or directly transferable accuracy target here. [Supervised Contrastive Learning](https://arxiv.org/html/2004.11362) motivates a later comparison of separate classification and metric representations; its results do not guarantee improvement on this patient protocol. Any revised recipe will retain a matched from-scratch classification-only control.
 
 ## Reproducibility and Usage
 
@@ -306,43 +308,41 @@ Training loads the saved patient split. Datasets, manifests, checkpoints and gen
 
 ### Training and Saved Artifacts
 
-The primary completed runs are `data/runs/resnet18_baseline_30ep_seed42/` and `data/runs/resnet18_siamese_30ep_seed42/`. Their five-epoch pilots use the names `resnet18_baseline_seed42` and `resnet18_siamese_seed42`; the historical compact runs use `baseline_seed42` and `siamese_seed42`.
+The completed runs `data/runs/resnet18_baseline_30ep_seed42/` and `data/runs/resnet18_siamese_30ep_seed42/` used ImageNet initialisation. Their saved artifacts and figures remain historical evidence. New from-scratch experiments use distinct run names containing `scratch`.
 
-The current `baseline.yaml` and `siamese.yaml` files contain the objective choice, pretrained initialisation and training hyperparameters. Their default five epochs support short pilots; the completed comparison explicitly overrides this to 30. Run names, paths, device and calibration targets use CLI arguments or Python defaults. Explicit CLI settings take precedence over YAML. `model: base` fixes the actual contrastive multiplier to zero; `model: siamese` uses the configured multiplier.
+The current `baseline.yaml` and `siamese.yaml` files contain the objective choice and training hyperparameters. Their default five epochs support the new pilots. Pretrained settings and flags have been removed. Run names, paths, device and calibration targets use CLI arguments or Python defaults. Explicit CLI settings take precedence over YAML. `model: base` fixes the actual contrastive multiplier to zero; `model: siamese` uses the configured multiplier.
 
-The recorded training commands for the current evidence are:
+Start the two from-scratch pilots with:
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
   --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/baseline.yaml \
-  --epochs 30 --seed 42 --run-name resnet18_baseline_30ep_seed42
+  --epochs 5 --seed 42 --run-name resnet18_baseline_scratch_seed42
 ```
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
   --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/siamese.yaml \
-  --epochs 30 --seed 42 --run-name resnet18_siamese_30ep_seed42
+  --epochs 5 --seed 42 --run-name resnet18_siamese_scratch_seed42
 ```
 
-Those directories already exist in this workspace. A fresh invocation needs a new run name; the commands document the completed settings and are not a resume procedure.
+Each command initialises every model component afresh. Existing run directories are refused; use a new name for each subsequent budget or seed. Training has no resume or pretrained-weight option and performs no weight download.
 
-The first pretrained training invocation may download the ImageNet weights into Torch's local cache. Subsequent invocations reuse that cache. Setting `pretrained: false` or passing `--no-pretrained` initialises ResNet-18 from scratch while retaining the same preprocessing.
-
-Each run saves `effective_config.json`, `checkpoint.pt`, `metrics.json`, `selection_predictions.csv`, `calibration_predictions.csv` and `training.svg` under `data/runs/<run-name>/`. Existing run directories are refused. The configuration records the settings actually used after defaults and overrides, including pretrained initialisation; its file hash links the checkpoint and metrics to those settings. The checkpoint also records the objective label and loss settings, learned projection and classifier tensors, preprocessing, patient protocol, fitting patients, score meaning, selected epoch and calibration-derived decision rule. Metrics record the initialisation setting, seed, resolved device, loss components, image/optimiser budgets, phase timings and development results. Training does not create a final prediction loader or save final scores.
+Each run saves `effective_config.json`, `checkpoint.pt`, `metrics.json`, `selection_predictions.csv`, `calibration_predictions.csv` and `training.svg` under `data/runs/<run-name>/`. The configuration records effective settings; its file hash links the checkpoint and metrics to those settings. The checkpoint also records the objective label and loss settings, learned projection and classifier tensors, preprocessing, patient protocol, fitting patients, score meaning, selected epoch and calibration-derived decision rule. Metrics record the seed, resolved device, loss components, image/optimiser budgets, phase timings and development results. Training does not create a final prediction loader or save final scores.
 
 ### Checkpoint Prediction
 
-Once a ResNet run is complete, its checkpoint defaults to calibration prediction. Prediction constructs ResNet-18 without pretrained initialisation, loads its saved tensors and applies the fixed preprocessing; reloading therefore does not download ImageNet weights. Its saved protocol, fitting patients, configuration and decision rule are checked before scoring. Prediction saves the CSV, score-distribution and failure-case SVGs, and an `evaluation.json` record identifying the checkpoint hash, role, runtime settings and resulting metrics. New prediction directories are refused if they already exist.
+Once a from-scratch run is complete, its checkpoint defaults to calibration prediction. Prediction constructs a randomly initialised architecture, restores that run's trained tensors and applies the fixed preprocessing. Its saved protocol, fitting patients, configuration and decision rule are checked before scoring. Prediction saves the CSV, score-distribution and failure-case SVGs, and an `evaluation.json` record identifying the checkpoint hash, role, runtime settings and resulting metrics. New prediction directories are refused if they already exist.
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-  --checkpoint data/runs/resnet18_baseline_30ep_seed42/checkpoint.pt \
+  --checkpoint data/runs/resnet18_baseline_scratch_seed42/checkpoint.pt \
   --partition calibration
 ```
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-  --checkpoint data/runs/resnet18_siamese_30ep_seed42/checkpoint.pt \
+  --checkpoint data/runs/resnet18_siamese_scratch_seed42/checkpoint.pt \
   --partition calibration
 ```
 
@@ -350,28 +350,28 @@ Final evaluation requires a checkpoint trained under the new protocol and all th
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-  --checkpoint data/runs/resnet18_baseline_30ep_seed42/checkpoint.pt \
+  --checkpoint data/runs/resnet18_baseline_scratch_seed42/checkpoint.pt \
   --partition final --evaluate-final \
   --evaluation-note "Model, preprocessing and decision policy frozen for final comparison."
 ```
 
-The prediction commands apply to the current ResNet checkpoints. The historical compact comparison is retained as saved-score evidence only.
+The prediction examples apply after the new from-scratch runs complete. The historical results above are retained as saved-score evidence only.
 
 Prediction prints and saves image identifiers, ground-truth labels, scores, binary predictions and triage decisions. Both objectives use the softmax melanoma score from the saved classifier on the normalised embedding. Pair labels, neighbour voting and gallery scores do not enter this image-level inference path. The score remains a ranking measure; class-balanced training does not establish probability calibration at natural melanoma prevalence.
 
 ### Reference and Referral Diagnostics
 
-The following commands generated the completed 30-epoch selection diagnostics. They execute checkpoint inference, not training, and are not launched automatically. Their output folders already exist here; use the new checkpoint paths when diagnosing subsequent experiments.
+After both from-scratch runs complete, generate their selection diagnostics with the following commands. They execute checkpoint inference, not training, and are not launched automatically. No from-scratch diagnostic outputs are claimed yet.
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.diagnostics \
-  --checkpoint data/runs/resnet18_baseline_30ep_seed42/checkpoint.pt \
+  --checkpoint data/runs/resnet18_baseline_scratch_seed42/checkpoint.pt \
   --partition selection
 ```
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.diagnostics \
-  --checkpoint data/runs/resnet18_siamese_30ep_seed42/checkpoint.pt \
+  --checkpoint data/runs/resnet18_siamese_scratch_seed42/checkpoint.pt \
   --partition selection
 ```
 
@@ -397,7 +397,7 @@ from pathlib import Path
 import numpy as np
 from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import plot_embedding_map
 
-folder = Path("data/runs/resnet18_siamese_30ep_seed42/diagnostics/selection")
+folder = Path("data/runs/resnet18_siamese_scratch_seed42/diagnostics/selection")
 with np.load(folder / "embeddings.npz") as evidence:
     plot_embedding_map(
         evidence["reference_embeddings"], evidence["reference_labels"],
@@ -408,14 +408,14 @@ with np.load(folder / "embeddings.npz") as evidence:
 
 ### Statistical Comparison
 
-The completed paired seed-42 comparison was generated from the 30-epoch diagnostics with:
+After both from-scratch selection diagnostics complete, generate their paired comparison with:
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.compare \
-  --baseline-runs data/runs/resnet18_baseline_30ep_seed42 \
-  --siamese-runs data/runs/resnet18_siamese_30ep_seed42 \
+  --baseline-runs data/runs/resnet18_baseline_scratch_seed42 \
+  --siamese-runs data/runs/resnet18_siamese_scratch_seed42 \
   --partition selection \
-  --output-dir data/comparisons/resnet18_30ep_selection_seed42
+  --output-dir data/comparisons/resnet18_scratch_selection_seed42
 ```
 
 This command reads `effective_config.json` and each run's `diagnostics/<partition>/evaluation.json` and `query_diagnostics.csv`. It opens no checkpoint or image. It requires matching completed roles, patient protocols, diagnostic settings and training hyperparameters. Predictions are aligned by unique image IDs, with patient IDs and labels checked. Matching seed pairs must use the same fitting-gallery identities; the baseline's actual contrastive weight must be zero and the Siamese weight positive.
@@ -435,7 +435,7 @@ The outputs cover accuracy, macro-F1, AUROC, melanoma average precision, both cl
 
 Seed SD uses the original cohort's estimates and is left blank for one seed. Patient intervals average metrics across the supplied trained runs without resampling training seeds. They condition on those models, their frozen calibration rules and observed patient-stratum counts; they exclude model-training and calibration uncertainty. They also do not correct optimism from selection-based checkpoint choice. Calibration comparisons describe policy-fitting patients. Final comparisons read only previously generated, explicitly authorised final diagnostic artifacts, after all model and policy choices are frozen. No cutoff is fitted or changed by this script.
 
-Existing output directories are refused. The SVG helper `plot_statistical_comparison(summary, output_path, partition)` lives in `visualisation.py` and accepts the rows of `summary.csv`, allowing regeneration from saved results. The completed comparison supplies the conditional intervals reported above. No multi-seed conclusion or patient intervals for the historical compact experiments are claimed.
+Existing output directories are refused. The SVG helper `plot_statistical_comparison(summary, output_path, partition)` lives in `visualisation.py` and accepts the rows of `summary.csv`, allowing regeneration from saved results. The earlier ImageNet comparison supplies the historical intervals reported above. From-scratch intervals and multi-seed conclusions remain pending. All runs in the new controlled comparison must be trained from scratch.
 
 ### Resource Measurements
 
@@ -447,11 +447,11 @@ Diagnostic `evaluation.json` separates reference encoding, calibration encoding 
 
 All three commands save `process_peak_rss_bytes`, the operating system's process-lifetime high-water mark, near their final report write after artifact generation. Use a fresh Python process for each command. This RSS measurement assesses the 24 GiB process-memory criterion. Each report's `total_seconds` includes setup and artifact generation, ending immediately before the final JSON write. It excludes Python startup/imports.
 
-`accelerator_peak_allocated_bytes` reports the CUDA tensor-allocation peak since the command's reset. Training includes model, optimiser and saved-best-state allocations. `accelerator_current_allocated_bytes` records current CUDA or MPS tensor allocation at reporting. MPS and CPU have no reported accelerator peak (`null`); the MPS snapshot excludes allocator caches and is not a peak or total Metal-driver allocation. RSS and accelerator allocation must not be added together, particularly with Apple unified memory. The measurements above come from the completed author-run ResNet training and diagnostic commands; historical compact reports retain their original measurements.
+`accelerator_peak_allocated_bytes` reports the CUDA tensor-allocation peak since the command's reset. Training includes model, optimiser and saved-best-state allocations. `accelerator_current_allocated_bytes` records current CUDA or MPS tensor allocation at reporting. MPS and CPU have no reported accelerator peak (`null`); the MPS snapshot excludes allocator caches and is not a peak or total Metal-driver allocation. RSS and accelerator allocation must not be added together, particularly with Apple unified memory. The measurements above come from the historical ImageNet-initialised training and diagnostic commands; they are not from-scratch measurements. Compact reports retain their original measurements.
 
 ### Saved-Score Visualisation
 
-The ROC and precision–recall figure can be regenerated independently from saved prediction CSVs and `metrics.json`. `visualisation.py` defaults to `calibration_predictions.csv`; `--predictions` selects any other saved CSV. It reads image labels and scores, calculates the curves and marks the frozen threshold stored in the metrics file. This offline command does not load a checkpoint or execute training or inference.
+The historical ImageNet ROC and precision–recall figures can be regenerated independently from their saved prediction CSVs and `metrics.json`. The examples below reproduce historical evidence, not from-scratch results. `visualisation.py` defaults to `calibration_predictions.csv`; `--predictions` selects any other saved CSV. It reads image labels and scores, calculates the curves and marks the frozen threshold stored in the metrics file. This offline command does not load a checkpoint or execute training or inference.
 
 ```bash
 python -m recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation \
@@ -487,29 +487,15 @@ for run, prefix in (
     plot_training_history(report["history"], figures / f"{prefix}_training.svg")
 ```
 
-### Planned Loss-Weight Ablation
+### From-Scratch Training Sequence
 
-The next two runs change only the contrastive multiplier from the completed Siamese value 1.0. They retain the existing margin, data, seed and 30-epoch budget. These commands use new run names and the existing CLI; the experiments have not yet been evaluated.
+Begin with the two five-epoch pilot commands above. Each constructs a fresh encoder, projection and classifier. Automatic device selection prefers CUDA, then MPS, then CPU. Review their saved learning histories before selecting a longer matched budget; the previous ImageNet results do not establish how many epochs random initialisation needs.
 
-```bash
-python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
-  --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/siamese.yaml \
-  --epochs 30 --seed 42 --contrastive-weight 0.1 \
-  --run-name resnet18_siamese_cw010_30ep_seed42
-```
-
-```bash
-python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
-  --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/siamese.yaml \
-  --epochs 30 --seed 42 --contrastive-weight 0.25 \
-  --run-name resnet18_siamese_cw025_30ep_seed42
-```
-
-Each command starts from ImageNet initialisation. Automatic device selection prefers CUDA, then MPS, then CPU. The completed runs suggest approximately 154 minutes per run on this machine, with runtime dependent on local conditions. After training, generate selection diagnostics for each new checkpoint and compare it with the existing 30-epoch baseline using a new comparison output directory. The four weights form a bounded exploratory search; they do not supply independent confirmatory comparisons.
+Once both objectives have comparable from-scratch training, generate selection diagnostics and the paired comparison. A subsequent loss-weight ablation may compare weights 0.1 and 0.25 against new from-scratch controls with the same seed and budget. Use new run names containing `scratch`, retain the fixed patient assignments, and keep final evaluation reserved until all choices are frozen. The earlier plan to reuse the existing ImageNet baseline for these ablations is superseded.
 
 ## Artificial Intelligence Usage Disclosure
 
-OpenAI Codex assisted with code organisation, the shared ResNet model, joint-loss training and prediction, reference/referral diagnostics, resource instrumentation, statistical comparison code, documentation, literature and public prior-year review, experiment planning and saved-artifact analysis. The author performed the compact and ResNet training runs, checkpoint diagnostics and statistical comparison. Codex checked saved identities and metrics, inspected diagnostic figures, and assembled the report and SVG evidence from saved outputs. The documentation update did not execute training, checkpoint inference or new bootstrap resampling. Prior-year source was reviewed outside the submission repository; no student implementation was transplanted into this model. The author remains responsible for reviewing the generated material and defending the architecture, experimental procedure, failure interpretation and conclusions.
+OpenAI Codex assisted with code organisation, the shared ResNet model, joint-loss training and prediction, reference/referral diagnostics, resource instrumentation, statistical comparison code, documentation, literature and public prior-year review, experiment planning and saved-artifact analysis. The author performed the compact and ResNet training runs, checkpoint diagnostics and statistical comparison. Codex checked saved identities and metrics, inspected diagnostic figures, and assembled the report and SVG evidence from saved outputs. The documentation update and subsequent from-scratch refactor did not execute training, checkpoint inference or new bootstrap resampling. The current refactor removes pretrained initialisation options and labels the earlier ImageNet results as excluded historical evidence. Prior-year source was reviewed outside the submission repository; no student implementation was transplanted into this model. The author remains responsible for reviewing the generated material and defending the architecture, experimental procedure, failure interpretation and conclusions.
 
 ## References and Image Attribution
 
@@ -520,7 +506,7 @@ Dermoscopic images used by the project come from the SIIM-ISIC 2020 dataset unde
 3. Hadsell, Chopra and LeCun. [Dimensionality Reduction by Learning an Invariant Mapping](https://doi.org/10.1109/CVPR.2006.100). *CVPR*, 2006.
 4. He et al. [Deep Residual Learning for Image Recognition](https://arxiv.org/abs/1512.03385). *CVPR*, 2016.
 5. Guo et al. [On Calibration of Modern Neural Networks](https://proceedings.mlr.press/v70/guo17a.html). *ICML*, 2017.
-6. Torchvision. [ResNet-18 pretrained weights and preprocessing](https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html).
+6. Torchvision. [ResNet-18 architecture and initialisation API](https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html).
 7. Field and Welsh. [Bootstrapping clustered data](https://doi.org/10.1111/j.1467-9868.2007.00593.x). *Journal of the Royal Statistical Society: Series B*, 2007.
 8. Saito and Rehmsmeier. [The Precision-Recall Plot Is More Informative than the ROC Plot When Evaluating Binary Classifiers on Imbalanced Datasets](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0118432). *PLOS ONE*, 2015.
 9. Ha, Liu and Liu. [Identifying Melanoma Images using EfficientNet Ensemble: Winning Solution to the SIIM-ISIC Melanoma Classification Challenge](https://arxiv.org/abs/2010.05351), 2020.

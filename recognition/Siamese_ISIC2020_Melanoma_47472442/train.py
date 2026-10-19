@@ -200,12 +200,6 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument(
         "--model", choices=("base", "siamese"), default=argparse.SUPPRESS
     )
-    parser.add_argument(
-        "--pretrained",
-        action=argparse.BooleanOptionalAction,
-        default=argparse.SUPPRESS,
-        help="Initialise ResNet-18 with ImageNet weights (may download once).",
-    )
     parser.add_argument("--run-name", default=argparse.SUPPRESS)
     parser.add_argument("--images-dir", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--metadata-csv", type=Path, default=argparse.SUPPRESS)
@@ -363,7 +357,7 @@ def main() -> None:
     calibration_loader = DataLoader(data.calibration, batch_size=args.batch_size)
 
     reset_peak_accelerator_memory(device)
-    model = MelanomaModel(pretrained=args.pretrained).to(device)
+    model = MelanomaModel().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
     train_loader = DataLoader(
@@ -455,7 +449,6 @@ def main() -> None:
     }
     report: dict[str, object] = {
         "model": args.model,
-        "pretrained": args.pretrained,
         "device": str(device),
         "seed": args.seed,
         "run_name": args.run_name,

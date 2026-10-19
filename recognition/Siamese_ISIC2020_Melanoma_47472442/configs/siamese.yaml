@@ -1,6 +1,5 @@
-# ResNet-18 contrastive embedding model.
+# ResNet-18 contrastive embedding model trained from random initialisation.
 model: siamese
-pretrained: true
 
 epochs: 5
 batch_size: 16

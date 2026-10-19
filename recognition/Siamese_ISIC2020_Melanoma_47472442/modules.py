@@ -5,33 +5,19 @@ from typing import Literal, cast
 import torch
 from torch import nn
 from torch.nn import functional as functional
-from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.models import resnet18
 
 
 ModelName = Literal["base", "siamese"]
 
 
-def _resnet18_encoder(pretrained: bool) -> nn.Module:
-    """Create a ResNet-18 encoder returning 512 features per image."""
-
-    weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
-    encoder = cast(nn.Module, resnet18(weights=weights))
-    encoder.fc = nn.Identity()
-    return encoder
-
-
 class MelanomaModel(nn.Module):
-    """Classify RGB lesions using their normalised image embeddings.
+    """Classify RGB lesions using a ResNet-18 initialised with random weights."""
 
-    Parameters
-    ----------
-    pretrained : bool, default=True
-        Initialise ResNet-18 with ImageNet-1K V1 weights.
-    """
-
-    def __init__(self, pretrained: bool = True) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.encoder = _resnet18_encoder(pretrained)
+        self.encoder = cast(nn.Module, resnet18(weights=None))
+        self.encoder.fc = nn.Identity()
         self.projection = nn.Linear(512, 128)
         self.classifier = nn.Linear(128, 2)
 

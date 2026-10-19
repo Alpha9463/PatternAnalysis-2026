@@ -1,6 +1,5 @@
-# ResNet-18 direct classifier.
+# ResNet-18 direct classifier trained from random initialisation.
 model: base
-pretrained: true
 
 epochs: 5
 batch_size: 16
