@@ -27,6 +27,7 @@ from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
     confusion_matrix,
+    log_loss,
     roc_auc_score,
 )
 from torch import nn
@@ -102,13 +103,17 @@ def train_epoch(
     Returns
     -------
     dict of str to float
-        Mean total, classification and unweighted contrastive losses.
+        Mean losses, same/different pair distances and active-negative fraction.
     """
 
     model.train()
     criterion = nn.CrossEntropyLoss()
     totals = {"train_loss": 0.0, "classification_loss": 0.0, "contrastive_loss": 0.0}
     seen = 0
+    same_pairs = 0
+    same_distance = 0.0
+    different_distance = 0.0
+    active_negatives = 0.0
     for first, second, first_targets, second_targets in loader:
         images = to_device(torch.cat((first, second)), device)
         labels = to_device(torch.cat((first_targets, second_targets)), device)
@@ -129,8 +134,18 @@ def train_epoch(
         totals["train_loss"] += loss.item() * batch_pairs
         totals["classification_loss"] += classification_loss.item() * batch_pairs
         totals["contrastive_loss"] += contrastive_loss.item() * batch_pairs
+        distances = distance.detach()
+        same_pairs += int(same.sum().item())
+        same_distance += (distances * same).sum().item()
+        different_distance += (distances * (1 - same)).sum().item()
+        active_negatives += ((distances < margin) * (1 - same)).sum().item()
         seen += batch_pairs
-    return {name: value / seen for name, value in totals.items()}
+    return {
+        **{name: value / seen for name, value in totals.items()},
+        "same_pair_distance": same_distance / same_pairs,
+        "different_pair_distance": different_distance / (seen - same_pairs),
+        "active_negative_fraction": active_negatives / (seen - same_pairs),
+    }
 
 
 @torch.no_grad()
@@ -208,6 +223,10 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument("--epochs", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--learning-rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--min-learning-rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--weight-decay", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--rotation-degrees", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--color-jitter", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--target-recall", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--pairs-per-epoch", type=int, default=argparse.SUPPRESS)
@@ -260,7 +279,13 @@ def build_datasets(args: RunConfig) -> TrainingData:
 
     dataset = ISICImageDataset(args.images_dir, args.metadata_csv)
     indices = load_protocol_manifest(dataset, args.protocol_manifest)
-    augmented = ISICImageDataset(args.images_dir, args.metadata_csv, training=True)
+    augmented = ISICImageDataset(
+        args.images_dir,
+        args.metadata_csv,
+        training=True,
+        rotation_degrees=args.rotation_degrees,
+        color_jitter=args.color_jitter,
+    )
     return TrainingData(
         fit=Subset(augmented, list(indices.fit)),
         selection=Subset(dataset, list(indices.selection)),
@@ -339,7 +364,7 @@ def main() -> None:
     run_directory = args.output_dir / args.run_name
     data = build_datasets(args)
     identity = protocol_identity(args.protocol_manifest)
-    preprocessing = model_preprocessing()
+    preprocessing = model_preprocessing(args.rotation_degrees, args.color_jitter)
     config = effective_config(args)
     run_directory.mkdir(parents=True, exist_ok=False)
     config_path = run_directory / "effective_config.json"
@@ -358,7 +383,12 @@ def main() -> None:
 
     reset_peak_accelerator_memory(device)
     model = MelanomaModel().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=args.min_learning_rate
+    )
     pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
     train_loader = DataLoader(
         pairs,
@@ -381,6 +411,7 @@ def main() -> None:
     selection_seconds = 0.0
     for epoch in range(args.epochs):
         pairs.set_epoch(epoch)
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         phase_started = synchronised_time(device)
         losses = train_epoch(
             model,
@@ -401,10 +432,17 @@ def main() -> None:
         average_precision = float(
             average_precision_score(selection_labels, selection_scores)
         )
+        selection_loss = float(
+            log_loss(selection_labels, selection_scores, labels=[0, 1])
+        )
+        selection_roc_auc = float(roc_auc_score(selection_labels, selection_scores))
         history.append(
             {
                 "epoch": float(epoch + 1),
                 **losses,
+                "learning_rate": learning_rate,
+                "selection_loss": selection_loss,
+                "selection_roc_auc": selection_roc_auc,
                 "selection_average_precision": average_precision,
                 "training_seconds": epoch_training_seconds,
                 "selection_seconds": epoch_selection_seconds,
@@ -412,16 +450,19 @@ def main() -> None:
         )
         plot_training_history(history, run_directory / "training.svg")
         print(
-            f"Epoch {epoch + 1}/{args.epochs}: loss={losses['train_loss']:.4f}, "
+            f"Epoch {epoch + 1}/{args.epochs}: lr={learning_rate:.2e}, "
+            f"loss={losses['train_loss']:.4f}, "
             f"CE={losses['classification_loss']:.4f}, "
             f"contrastive={losses['contrastive_loss']:.4f}, "
-            f"selection AP={average_precision:.4f}",
+            f"selection loss={selection_loss:.4f}, "
+            f"AP={average_precision:.4f}, AUROC={selection_roc_auc:.4f}",
             flush=True,
         )
         if average_precision > best_average_precision:
             best_average_precision = average_precision
             best_epoch = epoch + 1
             best_state = copy.deepcopy(model.state_dict())
+        scheduler.step()
 
     model.load_state_dict(best_state)
     phase_started = synchronised_time(device)

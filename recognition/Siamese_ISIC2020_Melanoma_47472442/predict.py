@@ -4,7 +4,7 @@ Run from the repository root after a completed training run::
 
     /Users/alexanderson/venvs/comp3710/bin/python -m \
       recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-      --checkpoint data/runs/resnet18_baseline_scratch_seed42/checkpoint.pt
+      --checkpoint data/runs/resnet18_baseline_scratch_recipe_seed42/checkpoint.pt
 
 This command applies the saved classifier and decision policy without
 training, changing patient splits, or selecting a new threshold. Prediction defaults to calibration; final patients require

@@ -10,7 +10,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
 from PIL import Image, ImageOps
@@ -19,8 +19,11 @@ from torchvision import transforms
 
 
 DEFAULT_METADATA_NAME = "ISIC_2020_Training_GroundTruth_v2.csv"
+DEFAULT_ROTATION_DEGREES = 15.0
+DEFAULT_COLOR_JITTER = 0.1
 _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
+_ROTATION_FILL = tuple(round(value * 255) for value in _MEAN)
 
 
 def repository_root() -> Path:
@@ -35,8 +38,24 @@ def default_data_dir() -> Path:
     return repository_root() / "data"
 
 
-def model_preprocessing() -> dict[str, object]:
-    """Describe the fixed ResNet-18 input pipeline saved with each run."""
+def model_preprocessing(
+    rotation_degrees: float = DEFAULT_ROTATION_DEGREES,
+    color_jitter: float = DEFAULT_COLOR_JITTER,
+) -> dict[str, object]:
+    """Describe inference preprocessing and fitting augmentation for a run.
+
+    Parameters
+    ----------
+    rotation_degrees : float, default=15.0
+        Maximum absolute fitting rotation angle in degrees.
+    color_jitter : float, default=0.1
+        Maximum relative brightness and contrast variation during fitting.
+
+    Returns
+    -------
+    dict of str to object
+        Fixed RGB input pipeline and configured fitting-only transforms.
+    """
 
     return {
         "image_size": 224,
@@ -49,7 +68,15 @@ def model_preprocessing() -> dict[str, object]:
         "normalization": {"mean": list(_MEAN), "std": list(_STD)},
         "exif_transpose": True,
         "layout": "CHW",
-        "fitting_augmentation": ["horizontal_flip_0.5", "vertical_flip_0.5"],
+        "fitting_augmentation": {
+            "horizontal_flip_probability": 0.5,
+            "vertical_flip_probability": 0.5,
+            "rotation_degrees": rotation_degrees,
+            "rotation_interpolation": "bilinear",
+            "rotation_fill": list(_ROTATION_FILL),
+            "brightness": color_jitter,
+            "contrast": color_jitter,
+        },
     }
 
 
@@ -72,7 +99,11 @@ class ISICImageDataset(Dataset):
         Extracted JPEG root and GroundTruth_v2 CSV. ``None`` searches
         repository ``data/``.
     training : bool, default=False
-        Apply random horizontal and vertical flips before preprocessing.
+        Apply fitting-only augmentation after resize and before centre crop.
+    rotation_degrees : float, default=15.0
+        Maximum absolute random rotation angle for fitting images.
+    color_jitter : float, default=0.1
+        Relative brightness and contrast variation for fitting images.
 
     Attributes
     ----------
@@ -85,6 +116,8 @@ class ISICImageDataset(Dataset):
         images_dir: str | Path | None = None,
         metadata_csv: str | Path | None = None,
         training: bool = False,
+        rotation_degrees: float = DEFAULT_ROTATION_DEGREES,
+        color_jitter: float = DEFAULT_COLOR_JITTER,
     ) -> None:
         self.images_dir = (
             Path(images_dir).expanduser() if images_dir else default_data_dir()
@@ -94,10 +127,25 @@ class ISICImageDataset(Dataset):
             if metadata_csv
             else next(default_data_dir().rglob(DEFAULT_METADATA_NAME))
         )
-        self.training = training
+        augmentation = (
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomRotation(
+                    rotation_degrees,
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                    # Torchvision accepts RGB fills despite its scalar annotation.
+                    fill=cast(Any, _ROTATION_FILL),
+                ),
+                transforms.ColorJitter(brightness=color_jitter, contrast=color_jitter),
+            ]
+            if training
+            else []
+        )
         self.transform = transforms.Compose(
             [
                 transforms.Resize(256, antialias=True),
+                *augmentation,
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 transforms.Normalize(_MEAN, _STD),
@@ -143,11 +191,6 @@ class ISICImageDataset(Dataset):
         sample = self.samples[index]
         with Image.open(sample.path) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")
-        if self.training:
-            if random.random() < 0.5:
-                image = ImageOps.mirror(image)
-            if random.random() < 0.5:
-                image = ImageOps.flip(image)
         return cast(torch.Tensor, self.transform(image)), torch.tensor(
             sample.label, dtype=torch.long
         )

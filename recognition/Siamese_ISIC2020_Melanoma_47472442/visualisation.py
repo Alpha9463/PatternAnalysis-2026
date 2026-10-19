@@ -26,6 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 from numpy.typing import NDArray
 from PIL import Image, ImageOps
 from sklearn.decomposition import PCA
@@ -73,14 +74,14 @@ class Prediction:
 def plot_training_history(
     history: Sequence[Mapping[str, float]], output_path: Path
 ) -> Path:
-    """Write an SVG showing training loss and checkpoint-selection performance.
+    """Write an SVG of recorded losses, selection metrics and training dynamics.
 
     Parameters
     ----------
     history : list of mapping
         Per-epoch records with ``epoch``, ``train_loss``, and
-        ``selection_average_precision`` fields. Classification and raw
-        contrastive losses are plotted when recorded.
+        ``selection_average_precision`` fields. Additional panels show recorded
+        selection loss/AUROC, learning rate, pair distances and active negatives.
     output_path : pathlib.Path
         SVG destination. Parent directories are created when needed.
 
@@ -91,51 +92,70 @@ def plot_training_history(
 
     """
 
-    metric_label = "Selection average precision"
     epochs = [int(entry["epoch"]) for entry in history]
-    losses = [entry["train_loss"] for entry in history]
-    average_precision = [entry["selection_average_precision"] for entry in history]
-
+    panels = [
+        (
+            "Training losses",
+            "Loss",
+            (
+                ("train_loss", "Total loss"),
+                ("classification_loss", "Cross-entropy"),
+                ("contrastive_loss", "Raw contrastive loss"),
+            ),
+        ),
+        (
+            "Selection ranking",
+            "Score",
+            (
+                ("selection_average_precision", "Average precision"),
+                ("selection_roc_auc", "AUROC"),
+            ),
+        ),
+        ("Selection loss", "Log loss", (("selection_loss", "Cross-entropy"),)),
+        ("Learning rate", "Learning rate", (("learning_rate", "AdamW learning rate"),)),
+        (
+            "Training pair distances",
+            "Euclidean distance",
+            (
+                ("same_pair_distance", "Same class"),
+                ("different_pair_distance", "Different class"),
+            ),
+        ),
+        (
+            "Different-class pairs inside margin",
+            "Fraction",
+            (("active_negative_fraction", "Active negatives"),),
+        ),
+    ]
+    panels = [
+        panel for panel in panels if any(field in history[0] for field, _ in panel[2])
+    ]
+    rows, columns = ceil(len(panels) / 3), min(len(panels), 3)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure, loss_axis = plt.subplots(figsize=(7.2, 4.5))
-    average_precision_axis = loss_axis.twinx()
-    loss_line = loss_axis.plot(
-        epochs, losses, "o-", color="#1f77b4", label="Total training loss"
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(4.5 * columns, 3.7 * rows), squeeze=False
     )
-    for field, label, color in (
-        ("classification_loss", "Cross-entropy", "#2ca02c"),
-        ("contrastive_loss", "Raw contrastive loss", "#9467bd"),
-    ):
-        if field in history[0]:
-            loss_line += loss_axis.plot(
-                epochs,
-                [entry[field] for entry in history],
-                "--",
-                color=color,
-                label=label,
-            )
-    average_precision_line = average_precision_axis.plot(
-        epochs,
-        average_precision,
-        "o-",
-        color="#d62728",
-        label=metric_label,
-    )
-    loss_axis.set(
-        title="Training history",
-        xlabel="Epoch",
-        ylabel="Training loss",
-        xticks=epochs,
-    )
-    average_precision_axis.set_ylabel(metric_label)
-    loss_axis.grid(axis="y", alpha=0.3)
-    loss_axis.legend(
-        loss_line + average_precision_line,
-        [str(line.get_label()) for line in loss_line + average_precision_line],
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.18),
-        ncol=2,
-    )
+    for axis, (title, ylabel, fields) in zip(axes.flat, panels):
+        for field, label in fields:
+            if field in history[0]:
+                axis.plot(
+                    epochs,
+                    [entry[field] for entry in history],
+                    "o-",
+                    markersize=3,
+                    label=label,
+                )
+        axis.set(title=title, xlabel="Epoch", ylabel=ylabel)
+        axis.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+        axis.grid(axis="y", alpha=0.3)
+        axis.legend(fontsize="small")
+        if ylabel == "Learning rate":
+            axis.set_yscale("log")
+        if ylabel in ("Score", "Fraction"):
+            axis.set_ylim(0, 1)
+    for axis in axes.flat:
+        axis.set_visible(bool(axis.lines))
+    figure.suptitle("Training history")
     figure.tight_layout()
     figure.savefig(output_path, format="svg", bbox_inches="tight")
     plt.close(figure)
