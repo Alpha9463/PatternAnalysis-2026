@@ -97,7 +97,7 @@ def encode_images(
     scores : numpy.ndarray
         Melanoma softmax scores in subset order.
     embeddings : torch.Tensor
-        CPU embeddings in subset order with shape ``[images, 128]``.
+        CPU embeddings in subset order with shape ``[images, 512]``.
     """
 
     model.eval()

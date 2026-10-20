@@ -60,7 +60,7 @@ class RunConfig:
     metadata_csv: Path | None = None
     output_dir: Path = default_data_dir() / "runs"
     protocol_manifest: Path = default_data_dir() / "splits" / "isic_protocol.json"
-    run_name: str = "resnet18_baseline_scratch_recipe_seed42"
+    run_name: str = "resnet18_baseline_scratch_features512_seed42"
     epochs: int = 5
     batch_size: int = 16
     learning_rate: float = 3e-4

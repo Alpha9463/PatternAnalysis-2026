@@ -18,8 +18,7 @@ class MelanomaModel(nn.Module):
         super().__init__()
         self.encoder = cast(nn.Module, resnet18(weights=None))
         self.encoder.fc = nn.Identity()
-        self.projection = nn.Linear(512, 128)
-        self.classifier = nn.Linear(128, 2)
+        self.classifier = nn.Linear(512, 2)
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute classification logits and embeddings in one encoder pass.
@@ -32,11 +31,13 @@ class MelanomaModel(nn.Module):
         Returns
         -------
         logits : torch.Tensor
-            Raw benign and melanoma logits with shape ``[batch, 2]``.
+            Benign and melanoma logits from raw backbone features, with shape
+            ``[batch, 2]``.
         embeddings : torch.Tensor
-            L2-normalised image embeddings with shape ``[batch, 128]``.
+            L2-normalised backbone features with shape ``[batch, 512]`` for
+            contrastive learning and reference comparison.
         """
 
         features = self.encoder(images)
-        embeddings = functional.normalize(self.projection(features), p=2, dim=1)
-        return self.classifier(embeddings), embeddings
+        embeddings = functional.normalize(features, p=2, dim=1)
+        return self.classifier(features), embeddings

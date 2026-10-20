@@ -89,7 +89,7 @@ def train_epoch(
     Parameters
     ----------
     model : MelanomaModel
-        Shared encoder, normalised projection and two-class head.
+        Shared encoder, raw-feature classifier and normalised feature embeddings.
     loader : torch.utils.data.DataLoader
         Fitting-only pairs with each member's image label.
     optimizer : torch.optim.Optimizer
