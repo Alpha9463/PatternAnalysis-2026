@@ -1,9 +1,9 @@
-# ResNet-18 direct classifier trained from random initialisation.
+# ResNet-18 direct classifier fine-tuned from ImageNet initialisation.
 model: base
 
-epochs: 5
+epochs: 30
 batch_size: 16
-learning_rate: 0.0003
+learning_rate: 0.0001
 min_learning_rate: 0.000001
 weight_decay: 0.0001
 rotation_degrees: 15.0

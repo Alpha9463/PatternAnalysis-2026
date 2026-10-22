@@ -33,6 +33,7 @@ from sklearn.metrics import (
 from torch import nn
 from torch.nn import functional as functional
 from torch.utils.data import DataLoader, Subset
+from torchvision.models import ResNet18_Weights
 
 from recognition.Siamese_ISIC2020_Melanoma_47472442.config import (
     RunConfig,
@@ -365,7 +366,8 @@ def main() -> None:
     data = build_datasets(args)
     identity = protocol_identity(args.protocol_manifest)
     preprocessing = model_preprocessing(args.rotation_degrees, args.color_jitter)
-    config = effective_config(args)
+    weights = ResNet18_Weights.IMAGENET1K_V1
+    config = {**effective_config(args), "initial_weights": str(weights)}
     run_directory.mkdir(parents=True, exist_ok=False)
     config_path = run_directory / "effective_config.json"
     with config_path.open("w", encoding="utf-8") as stream:
@@ -382,7 +384,7 @@ def main() -> None:
     calibration_loader = DataLoader(data.calibration, batch_size=args.batch_size)
 
     reset_peak_accelerator_memory(device)
-    model = MelanomaModel().to(device)
+    model = MelanomaModel(weights=weights).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
@@ -518,6 +520,12 @@ def main() -> None:
         ),
         "calibration": classification_metrics(
             calibration_labels, calibration_scores, decision_rule["threshold"]
+        ),
+        "selection_at_0_5": classification_metrics(
+            selection_labels, selection_scores, 0.5
+        ),
+        "calibration_at_0_5": classification_metrics(
+            calibration_labels, calibration_scores, 0.5
         ),
         "profile": profile,
         "timings": timings,

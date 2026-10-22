@@ -449,6 +449,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "status": "complete",
             "evaluation": evaluation_metrics,
             "classifier": classification_metrics(labels, scores, threshold),
+            "classifier_at_0_5": classification_metrics(labels, scores, 0.5),
             "query_images": len(predictions),
             "failure_cases": [predictions[index].image_name for index in failures],
             "timings": {

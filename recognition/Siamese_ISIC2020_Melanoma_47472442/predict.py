@@ -4,7 +4,7 @@ Run from the repository root after a completed training run::
 
     /Users/alexanderson/venvs/comp3710/bin/python -m \
       recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-      --checkpoint data/runs/resnet18_baseline_scratch_features512_30ep_seed42/checkpoint.pt
+      --checkpoint data/runs/resnet18_baseline_imagenet_features512_30ep_seed42/checkpoint.pt
 
 This command applies the saved classifier and decision policy without
 training, changing patient splits, or selecting a new threshold. Prediction defaults to calibration; final patients require
@@ -143,7 +143,7 @@ def check_final_evaluation(
 def load_run_for_prediction(
     checkpoint_path: Path, device: torch.device
 ) -> tuple[MelanomaModel, dict[str, Any]]:
-    """Restore trained weights into a randomly initialised model architecture.
+    """Restore trained weights without downloading ImageNet initialisation.
 
     Parameters
     ----------
@@ -459,6 +459,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "metrics": classification_metrics(
                 labels, scores, decision_rule["threshold"]
             ),
+            "metrics_at_0_5": classification_metrics(labels, scores, 0.5),
             "prediction_count": len(predictions),
             "predictions_sha256": file_sha256(prediction_path),
             "timings": {

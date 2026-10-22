@@ -5,18 +5,25 @@ from typing import Literal, cast
 import torch
 from torch import nn
 from torch.nn import functional as functional
-from torchvision.models import resnet18
+from torchvision.models import ResNet18_Weights, resnet18
 
 
 ModelName = Literal["base", "siamese"]
 
 
 class MelanomaModel(nn.Module):
-    """Classify RGB lesions using a ResNet-18 initialised with random weights."""
+    """Classify RGB lesions with Torchvision's ResNet-18 backbone.
 
-    def __init__(self) -> None:
+    Parameters
+    ----------
+    weights : torchvision.models.ResNet18_Weights or None, default=None
+        Encoder initialisation; training supplies ImageNet weights. Checkpoint
+        restoration uses ``None`` and loads the saved trained tensors directly.
+    """
+
+    def __init__(self, weights: ResNet18_Weights | None = None) -> None:
         super().__init__()
-        self.encoder = cast(nn.Module, resnet18(weights=None))
+        self.encoder = cast(nn.Module, resnet18(weights=weights))
         self.encoder.fc = nn.Identity()
         self.classifier = nn.Linear(512, 2)
 

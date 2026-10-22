@@ -60,10 +60,10 @@ class RunConfig:
     metadata_csv: Path | None = None
     output_dir: Path = default_data_dir() / "runs"
     protocol_manifest: Path = default_data_dir() / "splits" / "isic_protocol.json"
-    run_name: str = "resnet18_baseline_scratch_features512_seed42"
-    epochs: int = 5
+    run_name: str = "resnet18_baseline_imagenet_features512_30ep_seed42"
+    epochs: int = 30
     batch_size: int = 16
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     min_learning_rate: float = 1e-6
     weight_decay: float = 1e-4
     rotation_degrees: float = DEFAULT_ROTATION_DEGREES
