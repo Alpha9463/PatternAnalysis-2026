@@ -40,8 +40,10 @@ DIAGNOSTIC_SETTINGS = ("target_melanoma_recall", "references_per_class", "neighb
 TRAINING_SETTINGS = (
     "initial_weights",
     "epochs",
+    "head_warmup_epochs",
     "batch_size",
     "learning_rate",
+    "encoder_learning_rate",
     "min_learning_rate",
     "weight_decay",
     "rotation_degrees",
@@ -134,7 +136,7 @@ def check_comparison(groups: Sequence[dict[int, Run]], seeds: Sequence[int]) -> 
                     "Use the two objectives with matching diagnostic settings/protocol"
                 )
             if any(
-                info["config"][key] != first_info["config"][key]
+                info["config"].get(key) != first_info["config"].get(key)
                 for key in TRAINING_SETTINGS
             ):
                 raise ValueError(

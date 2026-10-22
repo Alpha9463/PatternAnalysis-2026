@@ -35,8 +35,10 @@ class RunConfig:
     epochs, batch_size : int
         Optimisation epochs and pairs per training batch. Scoring uses
         ``batch_size`` individual images per batch.
-    learning_rate, min_learning_rate : float
-        Initial AdamW learning rate and cosine-decay minimum.
+    head_warmup_epochs : int
+        Initial classifier-only epochs, included in ``epochs``.
+    learning_rate, encoder_learning_rate, min_learning_rate : float
+        Initial classifier/encoder AdamW rates and shared cosine-decay minimum.
     weight_decay : float
         Decoupled AdamW weight decay.
     rotation_degrees, color_jitter : float
@@ -60,10 +62,12 @@ class RunConfig:
     metadata_csv: Path | None = None
     output_dir: Path = default_data_dir() / "runs"
     protocol_manifest: Path = default_data_dir() / "splits" / "isic_protocol.json"
-    run_name: str = "resnet18_baseline_imagenet_features512_30ep_seed42"
+    run_name: str = "resnet18_baseline_imagenet_staged_30ep_seed42"
     epochs: int = 30
+    head_warmup_epochs: int = 3
     batch_size: int = 16
     learning_rate: float = 1e-4
+    encoder_learning_rate: float = 1e-5
     min_learning_rate: float = 1e-6
     weight_decay: float = 1e-4
     rotation_degrees: float = DEFAULT_ROTATION_DEGREES

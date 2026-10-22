@@ -84,6 +84,7 @@ def train_epoch(
     device: torch.device,
     contrastive_weight: float,
     margin: float,
+    train_encoder: bool = True,
 ) -> dict[str, float]:
     """Fit one epoch on identical paired-image batches for either objective.
 
@@ -100,6 +101,9 @@ def train_epoch(
     contrastive_weight, margin : float
         Contrastive multiplier and different-class distance margin. A zero
         multiplier gives the classification-only ablation.
+    train_encoder : bool, default=True
+        Update the encoder. ``False`` freezes its weights and BatchNorm running
+        statistics while the classifier learns during head warmup.
 
     Returns
     -------
@@ -108,6 +112,9 @@ def train_epoch(
     """
 
     model.train()
+    model.encoder.requires_grad_(train_encoder)
+    if not train_encoder:
+        model.encoder.eval()
     criterion = nn.CrossEntropyLoss()
     totals = {"train_loss": 0.0, "classification_loss": 0.0, "contrastive_loss": 0.0}
     seen = 0
@@ -222,8 +229,12 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument("--output-dir", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--protocol-manifest", type=Path, default=argparse.SUPPRESS)
     parser.add_argument("--epochs", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--head-warmup-epochs", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--learning-rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--encoder-learning-rate", type=float, default=argparse.SUPPRESS
+    )
     parser.add_argument("--min-learning-rate", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--weight-decay", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--rotation-degrees", type=float, default=argparse.SUPPRESS)
@@ -386,10 +397,17 @@ def main() -> None:
     reset_peak_accelerator_memory(device)
     model = MelanomaModel(weights=weights).to(device)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
+        [
+            {"params": model.classifier.parameters()},
+            {"params": model.encoder.parameters(), "lr": args.encoder_learning_rate},
+        ],
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=args.min_learning_rate
+        optimizer,
+        T_max=args.epochs - args.head_warmup_epochs,
+        eta_min=args.min_learning_rate,
     )
     pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
     train_loader = DataLoader(
@@ -413,7 +431,11 @@ def main() -> None:
     selection_seconds = 0.0
     for epoch in range(args.epochs):
         pairs.set_epoch(epoch)
+        train_encoder = epoch >= args.head_warmup_epochs
         learning_rate = float(optimizer.param_groups[0]["lr"])
+        encoder_learning_rate = (
+            float(optimizer.param_groups[1]["lr"]) if train_encoder else 0.0
+        )
         phase_started = synchronised_time(device)
         losses = train_epoch(
             model,
@@ -422,6 +444,7 @@ def main() -> None:
             device,
             contrastive_weight,
             args.contrastive_margin,
+            train_encoder=train_encoder,
         )
         epoch_training_seconds = synchronised_time(device) - phase_started
         training_seconds += epoch_training_seconds
@@ -443,6 +466,7 @@ def main() -> None:
                 "epoch": float(epoch + 1),
                 **losses,
                 "learning_rate": learning_rate,
+                "encoder_learning_rate": encoder_learning_rate,
                 "selection_loss": selection_loss,
                 "selection_roc_auc": selection_roc_auc,
                 "selection_average_precision": average_precision,
@@ -451,8 +475,10 @@ def main() -> None:
             }
         )
         plot_training_history(history, run_directory / "training.svg")
+        stage = "fine-tuning" if train_encoder else "head warmup"
         print(
-            f"Epoch {epoch + 1}/{args.epochs}: lr={learning_rate:.2e}, "
+            f"Epoch {epoch + 1}/{args.epochs} ({stage}): "
+            f"head lr={learning_rate:.2e}, encoder lr={encoder_learning_rate:.2e}, "
             f"loss={losses['train_loss']:.4f}, "
             f"CE={losses['classification_loss']:.4f}, "
             f"contrastive={losses['contrastive_loss']:.4f}, "
@@ -464,7 +490,8 @@ def main() -> None:
             best_average_precision = average_precision
             best_epoch = epoch + 1
             best_state = copy.deepcopy(model.state_dict())
-        scheduler.step()
+        if train_encoder:
+            scheduler.step()
 
     model.load_state_dict(best_state)
     phase_started = synchronised_time(device)
@@ -505,6 +532,8 @@ def main() -> None:
             "optimizer_steps_per_epoch": len(train_loader),
             "total_image_presentations": 2 * len(pairs) * args.epochs,
             "total_optimizer_steps": len(train_loader) * args.epochs,
+            "encoder_optimizer_steps": len(train_loader)
+            * (args.epochs - args.head_warmup_epochs),
         },
         "protocol": identity,
         "partitions": partition_summary(data.dataset, data.indices),

@@ -81,7 +81,8 @@ def plot_training_history(
     history : list of mapping
         Per-epoch records with ``epoch``, ``train_loss``, and
         ``selection_average_precision`` fields. Additional panels show recorded
-        selection loss/AUROC, learning rate, pair distances and active negatives.
+        selection loss/AUROC, classifier/encoder learning rates, pair distances
+        and active negatives. Frozen encoder rates are omitted on the log axis.
     output_path : pathlib.Path
         SVG destination. Parent directories are created when needed.
 
@@ -112,7 +113,14 @@ def plot_training_history(
             ),
         ),
         ("Selection loss", "Log loss", (("selection_loss", "Cross-entropy"),)),
-        ("Learning rate", "Learning rate", (("learning_rate", "AdamW learning rate"),)),
+        (
+            "Learning rates",
+            "Learning rate",
+            (
+                ("learning_rate", "Classifier"),
+                ("encoder_learning_rate", "Encoder (zero = frozen)"),
+            ),
+        ),
         (
             "Training pair distances",
             "Euclidean distance",
@@ -138,9 +146,12 @@ def plot_training_history(
     for axis, (title, ylabel, fields) in zip(axes.flat, panels):
         for field, label in fields:
             if field in history[0]:
+                values = [entry[field] for entry in history]
+                if field == "encoder_learning_rate":
+                    values = [value if value > 0 else np.nan for value in values]
                 axis.plot(
                     epochs,
-                    [entry[field] for entry in history],
+                    values,
                     "o-",
                     markersize=3,
                     label=label,
