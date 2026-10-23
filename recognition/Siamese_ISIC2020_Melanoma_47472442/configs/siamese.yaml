@@ -2,13 +2,15 @@
 model: siamese
 
 epochs: 30
-head_warmup_epochs: 3
+head_warmup_epochs: 0
 batch_size: 16
 learning_rate: 0.0001
-encoder_learning_rate: 0.00001
+encoder_learning_rate: 0.0001
 min_learning_rate: 0.000001
 weight_decay: 0.0001
-rotation_degrees: 15.0
+rotation_degrees: 45.0
+translation_fraction: 0.05
+scale_jitter: 0.1
 color_jitter: 0.1
 pairs_per_epoch: 4096
 contrastive_weight: 0.1

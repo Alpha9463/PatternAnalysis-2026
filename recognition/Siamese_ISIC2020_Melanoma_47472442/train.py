@@ -239,6 +239,8 @@ def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
     parser.add_argument("--weight-decay", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--rotation-degrees", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--color-jitter", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--translation-fraction", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--scale-jitter", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--target-recall", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--pairs-per-epoch", type=int, default=argparse.SUPPRESS)
@@ -297,6 +299,8 @@ def build_datasets(args: RunConfig) -> TrainingData:
         training=True,
         rotation_degrees=args.rotation_degrees,
         color_jitter=args.color_jitter,
+        translation_fraction=args.translation_fraction,
+        scale_jitter=args.scale_jitter,
     )
     return TrainingData(
         fit=Subset(augmented, list(indices.fit)),
@@ -376,7 +380,12 @@ def main() -> None:
     run_directory = args.output_dir / args.run_name
     data = build_datasets(args)
     identity = protocol_identity(args.protocol_manifest)
-    preprocessing = model_preprocessing(args.rotation_degrees, args.color_jitter)
+    preprocessing = model_preprocessing(
+        args.rotation_degrees,
+        args.color_jitter,
+        args.translation_fraction,
+        args.scale_jitter,
+    )
     weights = ResNet18_Weights.IMAGENET1K_V1
     config = {**effective_config(args), "initial_weights": str(weights)}
     run_directory.mkdir(parents=True, exist_ok=False)
@@ -460,11 +469,24 @@ def main() -> None:
         selection_loss = float(
             log_loss(selection_labels, selection_scores, labels=[0, 1])
         )
+        class_losses = {
+            f"selection_{name}_loss": float(
+                log_loss(
+                    selection_labels[selection_labels == label],
+                    selection_scores[selection_labels == label],
+                    labels=[0, 1],
+                )
+            )
+            for label, name in enumerate(("benign", "melanoma"))
+        }
+        coverage = pairs.sampling_coverage()
         selection_roc_auc = float(roc_auc_score(selection_labels, selection_scores))
         history.append(
             {
                 "epoch": float(epoch + 1),
                 **losses,
+                **class_losses,
+                **coverage,
                 "learning_rate": learning_rate,
                 "encoder_learning_rate": encoder_learning_rate,
                 "selection_loss": selection_loss,
@@ -483,7 +505,12 @@ def main() -> None:
             f"CE={losses['classification_loss']:.4f}, "
             f"contrastive={losses['contrastive_loss']:.4f}, "
             f"selection loss={selection_loss:.4f}, "
-            f"AP={average_precision:.4f}, AUROC={selection_roc_auc:.4f}",
+            f"benign loss={class_losses['selection_benign_loss']:.4f}, "
+            f"melanoma loss={class_losses['selection_melanoma_loss']:.4f}, "
+            f"AP={average_precision:.4f}, AUROC={selection_roc_auc:.4f}; "
+            f"unique benign images={coverage['sampled_benign_images']:.0f}, "
+            f"melanoma images={coverage['sampled_melanoma_images']:.0f}, "
+            f"melanoma patients={coverage['sampled_melanoma_patients']:.0f}",
             flush=True,
         )
         if average_precision > best_average_precision:

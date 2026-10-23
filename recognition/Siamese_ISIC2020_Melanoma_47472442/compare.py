@@ -48,6 +48,8 @@ TRAINING_SETTINGS = (
     "weight_decay",
     "rotation_degrees",
     "color_jitter",
+    "translation_fraction",
+    "scale_jitter",
     "pairs_per_epoch",
     "contrastive_margin",
     "target_recall",

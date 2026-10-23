@@ -81,8 +81,9 @@ def plot_training_history(
     history : list of mapping
         Per-epoch records with ``epoch``, ``train_loss``, and
         ``selection_average_precision`` fields. Additional panels show recorded
-        selection loss/AUROC, classifier/encoder learning rates, pair distances
-        and active negatives. Frozen encoder rates are omitted on the log axis.
+        overall/per-class selection loss, sampling coverage, AUROC, learning
+        rates, pair distances and active negatives. Frozen encoder rates are
+        omitted on the logarithmic learning-rate axis.
     output_path : pathlib.Path
         SVG destination. Parent directories are created when needed.
 
@@ -112,7 +113,15 @@ def plot_training_history(
                 ("selection_roc_auc", "AUROC"),
             ),
         ),
-        ("Selection loss", "Log loss", (("selection_loss", "Cross-entropy"),)),
+        (
+            "Selection loss",
+            "Log loss",
+            (
+                ("selection_loss", "Overall"),
+                ("selection_benign_loss", "Benign"),
+                ("selection_melanoma_loss", "Melanoma"),
+            ),
+        ),
         (
             "Learning rates",
             "Learning rate",
@@ -133,6 +142,15 @@ def plot_training_history(
             "Different-class pairs inside margin",
             "Fraction",
             (("active_negative_fraction", "Active negatives"),),
+        ),
+        (
+            "Unique fitting examples per epoch",
+            "Unique count",
+            (
+                ("sampled_benign_images", "Benign images"),
+                ("sampled_melanoma_images", "Melanoma images"),
+                ("sampled_melanoma_patients", "Melanoma patients"),
+            ),
         ),
     ]
     panels = [
@@ -160,7 +178,7 @@ def plot_training_history(
         axis.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
         axis.grid(axis="y", alpha=0.3)
         axis.legend(fontsize="small")
-        if ylabel == "Learning rate":
+        if ylabel in ("Learning rate", "Unique count"):
             axis.set_yscale("log")
         if ylabel in ("Score", "Fraction"):
             axis.set_ylim(0, 1)

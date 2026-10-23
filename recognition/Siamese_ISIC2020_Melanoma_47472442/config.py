@@ -9,6 +9,8 @@ import yaml
 from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
     DEFAULT_COLOR_JITTER,
     DEFAULT_ROTATION_DEGREES,
+    DEFAULT_SCALE_JITTER,
+    DEFAULT_TRANSLATION_FRACTION,
     default_data_dir,
     repository_root,
 )
@@ -43,6 +45,8 @@ class RunConfig:
         Decoupled AdamW weight decay.
     rotation_degrees, color_jitter : float
         Maximum fitting rotation angle and relative brightness/contrast variation.
+    translation_fraction, scale_jitter : float
+        Maximum fractional shifts and relative scale variation during fitting.
     seed : int
         Model initialisation and sampling seed.
     target_recall : float
@@ -62,16 +66,18 @@ class RunConfig:
     metadata_csv: Path | None = None
     output_dir: Path = default_data_dir() / "runs"
     protocol_manifest: Path = default_data_dir() / "splits" / "isic_protocol.json"
-    run_name: str = "resnet18_baseline_imagenet_staged_30ep_seed42"
+    run_name: str = "resnet18_baseline_imagenet_aug_30ep_seed42"
     epochs: int = 30
-    head_warmup_epochs: int = 3
+    head_warmup_epochs: int = 0
     batch_size: int = 16
     learning_rate: float = 1e-4
-    encoder_learning_rate: float = 1e-5
+    encoder_learning_rate: float = 1e-4
     min_learning_rate: float = 1e-6
     weight_decay: float = 1e-4
     rotation_degrees: float = DEFAULT_ROTATION_DEGREES
     color_jitter: float = DEFAULT_COLOR_JITTER
+    translation_fraction: float = DEFAULT_TRANSLATION_FRACTION
+    scale_jitter: float = DEFAULT_SCALE_JITTER
     seed: int = 42
     target_recall: float = 0.9
     pairs_per_epoch: int = 4096

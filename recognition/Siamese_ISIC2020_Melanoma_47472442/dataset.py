@@ -19,11 +19,13 @@ from torchvision import transforms
 
 
 DEFAULT_METADATA_NAME = "ISIC_2020_Training_GroundTruth_v2.csv"
-DEFAULT_ROTATION_DEGREES = 15.0
+DEFAULT_ROTATION_DEGREES = 45.0
 DEFAULT_COLOR_JITTER = 0.1
+DEFAULT_TRANSLATION_FRACTION = 0.05
+DEFAULT_SCALE_JITTER = 0.1
 _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
-_ROTATION_FILL = tuple(round(value * 255) for value in _MEAN)
+_AFFINE_FILL = tuple(round(value * 255) for value in _MEAN)
 
 
 def repository_root() -> Path:
@@ -41,15 +43,21 @@ def default_data_dir() -> Path:
 def model_preprocessing(
     rotation_degrees: float = DEFAULT_ROTATION_DEGREES,
     color_jitter: float = DEFAULT_COLOR_JITTER,
+    translation_fraction: float = DEFAULT_TRANSLATION_FRACTION,
+    scale_jitter: float = DEFAULT_SCALE_JITTER,
 ) -> dict[str, object]:
     """Describe inference preprocessing and fitting augmentation for a run.
 
     Parameters
     ----------
-    rotation_degrees : float, default=15.0
+    rotation_degrees : float, default=45.0
         Maximum absolute fitting rotation angle in degrees.
     color_jitter : float, default=0.1
         Maximum relative brightness and contrast variation during fitting.
+    translation_fraction : float, default=0.05
+        Maximum horizontal and vertical shifts as fractions of image dimensions.
+    scale_jitter : float, default=0.1
+        Scale factors range from ``1 - scale_jitter`` to ``1 + scale_jitter``.
 
     Returns
     -------
@@ -72,8 +80,10 @@ def model_preprocessing(
             "horizontal_flip_probability": 0.5,
             "vertical_flip_probability": 0.5,
             "rotation_degrees": rotation_degrees,
-            "rotation_interpolation": "bilinear",
-            "rotation_fill": list(_ROTATION_FILL),
+            "translation_fraction": translation_fraction,
+            "scale_range": [1 - scale_jitter, 1 + scale_jitter],
+            "affine_interpolation": "bilinear",
+            "affine_fill": list(_AFFINE_FILL),
             "brightness": color_jitter,
             "contrast": color_jitter,
         },
@@ -100,10 +110,14 @@ class ISICImageDataset(Dataset):
         repository ``data/``.
     training : bool, default=False
         Apply fitting-only augmentation after resize and before centre crop.
-    rotation_degrees : float, default=15.0
+    rotation_degrees : float, default=45.0
         Maximum absolute random rotation angle for fitting images.
     color_jitter : float, default=0.1
         Relative brightness and contrast variation for fitting images.
+    translation_fraction : float, default=0.05
+        Maximum horizontal and vertical shifts as fractions of image dimensions.
+    scale_jitter : float, default=0.1
+        Relative variation around a scale factor of one for fitting images.
 
     Attributes
     ----------
@@ -118,6 +132,8 @@ class ISICImageDataset(Dataset):
         training: bool = False,
         rotation_degrees: float = DEFAULT_ROTATION_DEGREES,
         color_jitter: float = DEFAULT_COLOR_JITTER,
+        translation_fraction: float = DEFAULT_TRANSLATION_FRACTION,
+        scale_jitter: float = DEFAULT_SCALE_JITTER,
     ) -> None:
         self.images_dir = (
             Path(images_dir).expanduser() if images_dir else default_data_dir()
@@ -131,11 +147,13 @@ class ISICImageDataset(Dataset):
             [
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomVerticalFlip(),
-                transforms.RandomRotation(
+                transforms.RandomAffine(
                     rotation_degrees,
+                    translate=(translation_fraction, translation_fraction),
+                    scale=(1 - scale_jitter, 1 + scale_jitter),
                     interpolation=transforms.InterpolationMode.BILINEAR,
                     # Torchvision accepts RGB fills despite its scalar annotation.
-                    fill=cast(Any, _ROTATION_FILL),
+                    fill=cast(Any, _AFFINE_FILL),
                 ),
                 transforms.ColorJitter(brightness=color_jitter, contrast=color_jitter),
             ]
@@ -212,6 +230,8 @@ class SiamesePairDataset(Dataset):
     -----
     Pair members always come from different patients. Call ``set_epoch``
     before each training epoch to draw a new deterministic set of pairs.
+    Pair indices are materialised before loading so coverage describes the
+    same stream used by the complete training loader.
     Each image's class label is returned for classification; matching labels
     identify positive pairs for the contrastive objective.
     """
@@ -233,6 +253,7 @@ class SiamesePairDataset(Dataset):
         for index in self.indices:
             sample = self.dataset.samples[index]
             self.by_label[sample.label][sample.patient_id].append(index)
+        self.set_epoch(0)
 
     def set_epoch(self, epoch: int) -> None:
         """Select a reproducible pair stream for an epoch.
@@ -244,6 +265,56 @@ class SiamesePairDataset(Dataset):
         """
 
         self.epoch = epoch
+        self.pair_indices = [self._sample_indices(index) for index in range(len(self))]
+
+    def sampling_coverage(self) -> dict[str, float]:
+        """Count unique fitting examples in this epoch's complete pair stream.
+
+        Returns
+        -------
+        dict of str to float
+            Unique benign images, melanoma images and melanoma patients. Counts
+            use the exact preselected indices loaded by the training DataLoader.
+        """
+
+        indices = {index for pair in self.pair_indices for index in pair}
+        samples = [self.dataset.samples[index] for index in indices]
+        melanomas = [sample for sample in samples if sample.label == 1]
+        return {
+            "sampled_benign_images": float(len(samples) - len(melanomas)),
+            "sampled_melanoma_images": float(len(melanomas)),
+            "sampled_melanoma_patients": float(
+                len({sample.patient_id for sample in melanomas})
+            ),
+        }
+
+    def _sample_indices(self, index: int) -> tuple[int, int]:
+        """Choose fitting indices using this epoch's per-pair RNG seed.
+
+        Parameters
+        ----------
+        index : int
+            Pair position within this epoch.
+
+        Returns
+        -------
+        tuple of int
+            Dataset indices from different patients with the selected labels.
+        """
+
+        rng = random.Random(self.seed + self.epoch * self.pairs_per_epoch + index)
+        first_label = rng.randrange(2)
+        same = index % 2 == 0
+        second_label = first_label if same else 1 - first_label
+        first_patient = rng.choice(sorted(self.by_label[first_label]))
+        possible_second = sorted(
+            pid for pid in self.by_label[second_label] if pid != first_patient
+        )
+        second_patient = rng.choice(possible_second)
+        return (
+            rng.choice(self.by_label[first_label][first_patient]),
+            rng.choice(self.by_label[second_label][second_patient]),
+        )
 
     def __len__(self) -> int:
         """Return the number of pairs drawn per epoch."""
@@ -272,17 +343,7 @@ class SiamesePairDataset(Dataset):
             Second image's int64 class label: benign (0) or melanoma (1).
         """
 
-        rng = random.Random(self.seed + self.epoch * self.pairs_per_epoch + index)
-        first_label = rng.randrange(2)
-        same = index % 2 == 0
-        second_label = first_label if same else 1 - first_label
-        first_patient = rng.choice(sorted(self.by_label[first_label]))
-        possible_second = sorted(
-            pid for pid in self.by_label[second_label] if pid != first_patient
-        )
-        second_patient = rng.choice(possible_second)
-        first_index = rng.choice(self.by_label[first_label][first_patient])
-        second_index = rng.choice(self.by_label[second_label][second_patient])
+        first_index, second_index = self.pair_indices[index]
         first, first_label_tensor = self.dataset[first_index]
         second, second_label_tensor = self.dataset[second_index]
         return first, second, first_label_tensor, second_label_tensor
