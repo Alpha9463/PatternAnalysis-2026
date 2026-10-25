@@ -1,4 +1,9 @@
-"""Shared classifier and metric-learning model for ISIC melanoma triage."""
+"""Shared classifier and metric-learning model for ISIC melanoma triage.
+
+Uses Torchvision's ResNet-18 implementation of He et al. (2016):
+https://arxiv.org/abs/1512.03385
+https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html
+"""
 
 from typing import Literal, cast
 

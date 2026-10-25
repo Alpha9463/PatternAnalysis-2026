@@ -109,6 +109,12 @@ def train_epoch(
     -------
     dict of str to float
         Mean losses, same/different pair distances and active-negative fraction.
+
+    References
+    ----------
+    .. [1] Hadsell, Chopra and LeCun, "Dimensionality Reduction by Learning an
+       Invariant Mapping," CVPR, 2006. https://doi.org/10.1109/CVPR.2006.100
+       The contrastive term uses same-label=1 and omits the constant factor 1/2.
     """
 
     model.train()

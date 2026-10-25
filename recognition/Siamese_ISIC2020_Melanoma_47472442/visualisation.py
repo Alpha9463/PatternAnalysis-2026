@@ -71,6 +71,72 @@ class Prediction:
     decision: str
 
 
+def plot_model_architecture(output_path: Path) -> Path:
+    """Write the shared encoder, classifier and metric-learning paths as SVG.
+
+    Parameters
+    ----------
+    output_path : pathlib.Path
+        Destination for the report's architecture diagram.
+
+    Returns
+    -------
+    pathlib.Path
+        Written SVG path. Training and diagnostic uses are labelled separately.
+    """
+
+    figure, axis = plt.subplots(figsize=(12, 4.2))
+    axis.set(xlim=(0, 1), ylim=(0, 1))
+    axis.axis("off")
+    boxes = (
+        (0.10, 0.54, "RGB image\n3 × 224 × 224"),
+        (0.36, 0.54, "Shared ResNet-18\n512 features"),
+        (0.68, 0.79, "Linear 512 → 2\nclassification logits"),
+        (0.68, 0.28, "L2-normalised\n512-feature embedding"),
+    )
+    for x, y, label in boxes:
+        axis.text(
+            x,
+            y,
+            label,
+            ha="center",
+            va="center",
+            fontsize=11,
+            bbox={"boxstyle": "round,pad=0.7", "fc": "#edf3f8", "ec": "#2878b5"},
+        )
+    for start, end in (
+        ((0.19, 0.54), (0.26, 0.54)),
+        ((0.46, 0.58), (0.57, 0.76)),
+        ((0.46, 0.50), (0.58, 0.30)),
+    ):
+        axis.annotate("", xy=end, xytext=start, arrowprops={"arrowstyle": "->"})
+    axis.text(
+        0.88,
+        0.79,
+        "Softmax score\nimage prediction\n+ cross-entropy fitting",
+        ha="center",
+        va="center",
+        fontsize=10,
+    )
+    axis.text(
+        0.88,
+        0.28,
+        "Contrastive fitting\n(Siamese only)\n+ reference diagnostics",
+        ha="center",
+        va="center",
+        fontsize=10,
+    )
+    axis.text(
+        0.5,
+        0.03,
+        "Pair members share all encoder/classifier weights. Baseline contrastive multiplier = 0.",
+        ha="center",
+        fontsize=10,
+    )
+    _save_svg(figure, output_path)
+    return output_path
+
+
 def plot_training_history(
     history: Sequence[Mapping[str, float]], output_path: Path
 ) -> Path:
@@ -477,7 +543,7 @@ def plot_prediction_score_distribution(
         threshold,
         color="black",
         linestyle="--",
-        label=f"Frozen threshold = {threshold:.3f}",
+        label=f"Frozen threshold = {threshold:.4g}",
     )
     axis.set(
         title="Held-out image score distributions",
@@ -532,8 +598,9 @@ def plot_reference_cases(
     selected: Sequence[int],
     output_path: Path,
     threshold: float,
+    references_shown: int = 3,
 ) -> Path:
-    """Show each query with up to three nearest fitting references in an SVG.
+    """Show queries and a chosen number of nearest fitting references as SVG.
 
     Parameters
     ----------
@@ -549,6 +616,9 @@ def plot_reference_cases(
         SVG destination; parent directories are created when needed.
     threshold : float
         Frozen binary classifier threshold, separate from the triage band.
+    references_shown : int, default=3
+        Maximum displayed fitting references per query. Agreement still uses
+        all saved neighbours; one displayed reference suits narrow report pages.
 
     Returns
     -------
@@ -558,7 +628,8 @@ def plot_reference_cases(
     """
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    columns = 1 + min(3, neighbors.indices.shape[1])
+    displayed = min(references_shown, neighbors.indices.shape[1])
+    columns = 1 + displayed
     figure, axes = plt.subplots(
         len(selected),
         columns,
@@ -571,14 +642,16 @@ def plot_reference_cases(
         row[0].imshow(_load_preview_image(prediction.image_path))
         row[0].set_title(
             f"Query · {_prediction_title(prediction)}\n"
-            f"classifier={classifier_label}; threshold={threshold:.3f}\n"
+            f"classifier={classifier_label}; threshold={threshold:.4g}\n"
             f"patient={prediction.patient_id}\n"
             f"neighbour disagreement={neighbors.disagreement[index]:.1%}\n"
             f"melanoma labels={neighbors.melanoma_fraction[index]:.1%}",
             fontsize=8,
         )
         for axis, reference_index, distance in zip(
-            row[1:], neighbors.indices[index, :3], neighbors.distances[index, :3]
+            row[1:],
+            neighbors.indices[index, :displayed],
+            neighbors.distances[index, :displayed],
         ):
             reference = gallery[int(reference_index)]
             actual = "melanoma" if reference.label == 1 else "benign"
@@ -591,7 +664,6 @@ def plot_reference_cases(
             )
         for axis in row:
             axis.axis("off")
-    figure.suptitle("Query decisions and nearest fitting references", fontsize=14)
     _save_svg(
         figure,
         output_path,
@@ -601,6 +673,100 @@ def plot_reference_cases(
         ),
     )
     return output_path
+
+
+def plot_saved_reference_cases(
+    directory: Path,
+    image_names: Sequence[str],
+    images_dir: Path,
+    output_path: Path,
+) -> Path:
+    """Regenerate selected reference cases from saved CSVs without inference.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        Completed diagnostic directory containing evaluation and neighbour files.
+    image_names : sequence of str
+        Query identifiers to display, in report order.
+    images_dir : pathlib.Path
+        Directory containing the original ISIC JPEGs, including subdirectories.
+    output_path : pathlib.Path
+        Destination SVG with one displayed fitting reference per query.
+
+    Returns
+    -------
+    pathlib.Path
+        Written figure. Agreement statistics retain all saved neighbours.
+    """
+
+    from .dataset import ISICSample
+    from .references import NeighborScores
+
+    with (directory / "query_diagnostics.csv").open(newline="") as stream:
+        queries = list(csv.DictReader(stream))
+    with (directory / "gallery.csv").open(newline="") as stream:
+        references = list(csv.DictReader(stream))
+    with (directory / "neighbors.csv").open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    paths = {path.stem: path for path in images_dir.rglob("*.jpg")}
+    gallery = [
+        ISICSample(
+            row["image_name"],
+            row["patient_id"],
+            int(row["actual"]),
+            paths[row["image_name"]],
+        )
+        for row in references
+    ]
+    predictions = [
+        Prediction(
+            row["image_name"],
+            row["patient_id"],
+            paths[row["image_name"]],
+            int(row["actual"]),
+            float(row["score"]),
+            row["decision"],
+        )
+        for row in queries
+    ]
+    reference_positions = {
+        row["image_name"]: index for index, row in enumerate(references)
+    }
+    query_positions = {row["image_name"]: index for index, row in enumerate(queries)}
+    by_rank = {(row["image_name"], int(row["rank"])): row for row in rows}
+    count = max(int(row["rank"]) for row in rows)
+    ordered = [
+        [by_rank[row["image_name"], rank] for rank in range(1, count + 1)]
+        for row in queries
+    ]
+    neighbors = NeighborScores(
+        indices=np.asarray(
+            [
+                [reference_positions[row["reference_image"]] for row in group]
+                for group in ordered
+            ]
+        ),
+        distances=np.asarray(
+            [[float(row["distance"]) for row in group] for group in ordered]
+        ),
+        melanoma_fraction=np.asarray(
+            [float(row["neighbor_melanoma_fraction"]) for row in queries]
+        ),
+        disagreement=np.asarray(
+            [float(row["neighbor_disagreement"]) for row in queries]
+        ),
+    )
+    report = json.loads((directory / "evaluation.json").read_text())
+    return plot_reference_cases(
+        predictions,
+        gallery,
+        neighbors,
+        [query_positions[name] for name in image_names],
+        output_path,
+        report["classifier_threshold"],
+        references_shown=1,
+    )
 
 
 def plot_referral_workload(
@@ -845,7 +1011,7 @@ def _prediction_title(prediction: Prediction) -> str:
     actual = "melanoma" if prediction.actual == 1 else "benign"
     return (
         f"{prediction.image_name}\n"
-        f"actual={actual}; score={prediction.score:.3f}\n"
+        f"actual={actual}; score={prediction.score:.4g}\n"
         f"decision={prediction.decision}"
     )
 
