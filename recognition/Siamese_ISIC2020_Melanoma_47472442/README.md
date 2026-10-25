@@ -103,6 +103,27 @@ The augmented baseline selects epoch 21 and Siamese epoch 30. At those checkpoin
 
 Selection reference and confidence policies are identical within each model. The baseline reviews 49.88% and captures 40/41 melanomas; Siamese reviews 49.71% and captures 37/41. The paired selection AP difference is -0.0577 [-0.1256, 0.0113], which includes zero. The baseline was retained as the operational reference before final evaluation, with the matched Siamese model retained for the controlled comparison.
 
+### Current Embedding Geometry and Retrieval
+
+The following maps use the frozen augmented checkpoints, their same 200 fitting-reference identities and all 2,438 selection queries, including 41 melanomas. PCA is fitted separately to each model's fitting-reference embeddings; selection embeddings are only transformed and coloured by their labels. The two axes retain 55.99% and 91.75% of reference variance for the baseline and Siamese models. Axes belong to different fitted projections, so coordinates and apparent distances cannot be compared directly across panels or treated as clinical explanations.
+
+![Current baseline embeddings: fitting-only PCA with selection queries](figures/aug_baseline_selection_embeddings.svg)
+
+![Current Siamese embeddings: fitting-only PCA with selection queries](figures/aug_siamese_selection_embeddings.svg)
+
+The maps show a fitting-to-selection mismatch for melanoma: many melanoma query crosses occupy the dense benign-query region, while most melanoma fitting references lie elsewhere. This is consistent with the retrieval measurements below; the projection does not establish the cause of the mismatch.
+
+The quantitative comparison below uses the original 512-feature Euclidean neighbours, before PCA. For each query, matching-neighbour fraction is the proportion of its five references with the same true class. Class-specific averages give benign and melanoma queries separate visibility. The five-neighbour melanoma fraction is also assessed as a descriptive ranking score; this does not replace the classifier or introduce a new decision policy.
+
+| Selection embedding diagnostic | Baseline | Siamese |
+| --- | ---: | ---: |
+| Benign-query matching neighbours | 99.18% | 99.64% |
+| Melanoma-query matching neighbours | 30.24% | 20.98% |
+| Neighbour melanoma-fraction AUROC | 0.6537 | 0.6197 |
+| Neighbour melanoma-fraction AP | 0.1719 | 0.1366 |
+
+Despite a balanced reference gallery, most references retrieved by held-out melanoma queries are benign: matching fractions are 30.24% and 20.98%. Benign agreement exceeds 99% in both models. The Siamese objective therefore has not produced uniformly class-pure neighbourhoods on these queries. Its lower observed retrieval AP and melanoma agreement help explain the lack of referral benefit; these descriptive selection results do not establish a population difference or prove that the representation has collapsed. Selection patients already influenced checkpoint choice, and 2D overlap alone cannot establish separation in the full embedding space.
+
 ## Frozen Final Results
 
 Final prevalence is 74/4,728 = 1.565%. All final images belong to patients outside current fitting, selection and calibration roles. Saved identities and labels match the manifest; independent recomputation matches the diagnostic reports. The selected-model comparison uses the same 288 final patients, including 60 with melanoma.
@@ -169,9 +190,29 @@ The lower thresholds increase melanoma recall with a large benign false-positive
 
 Extended referral denotes either confidence-only or reference disagreement: their decisions and entire workload curves are identical within each model. Both models capture exactly the same 71 melanomas and clear the same three: `ISIC_3909039`, `ISIC_6982386` and `ISIC_7346228`. The baseline reviews 101 fewer benign images at this observed capture. It adds 634 reviews to its binary flags to capture seven more melanomas; Siamese adds 518 reviews to capture two more.
 
-Every classifier-negative final image has five benign nearest references. Reference disagreement is constant at zero in that group, giving false-negative error-detection AUROC 0.5. Its overall error-detection AUROC near 0.98 mainly identifies false-positive flags already routed for review. It is not melanoma-classification AUROC and supplies no additional ranking signal to rescue false negatives. The reference policy falls back to the confidence tie-breaker, explaining the identical queues.
+| Absolute extended-referral measure, conditional 95% patient interval | Baseline | Siamese |
+| --- | ---: | ---: |
+| Melanoma capture, % | 95.95 [91.25, 100.00] | 95.95 [91.25, 100.00] |
+| Image review workload, % | 48.03 [44.42, 51.73] | 50.17 [47.13, 53.31] |
+
+The observed 95.95% capture has interval [91.25%, 100.00%] in both models. It does not establish a 95% population sensitivity floor. These intervals reuse the 2,000 patient-cluster draws and condition on the frozen checkpoints and calibration rules; uncertainty from training seeds and policy fitting is excluded. The lower workload estimate for the baseline is also uncertain, as the paired comparison below shows.
 
 ![Baseline final referral workload and capture](figures/aug_baseline_final_referrals.svg)
+
+### Does Uncertainty Rank Diagnostic Errors?
+
+Here an error is a wrong image label under the frozen binary threshold, and the positive outcome for AUROC is that error. Higher confidence uncertainty, $-|p-t|$, or higher neighbour disagreement should rank errors above correct predictions. This is a different target from melanoma-classification AUROC and does not measure probability calibration.
+
+| Model and evaluated population | Errors / images | Confidence error AUROC | Reference error AUROC |
+| --- | ---: | ---: | ---: |
+| Baseline: All final images | 1583/4728 | 0.1369 | 0.9786 |
+| Baseline: Classifier-negative only | 10/3091 | 0.8073 | 0.5000 |
+| Siamese: All final images | 1790/4728 | 0.1751 | 0.9824 |
+| Siamese: Classifier-negative only | 5/2874 | 0.8213 | 0.5000 |
+
+Across all images, the reference score appears strong because the errors are dominated by 1,573/1,785 false positives. Benign references disagree with many of those positive flags, which already enter the review queue. Confidence AUROC below 0.5 reflects many false-positive flags lying far above the tiny binary threshold and therefore receiving low uncertainty.
+
+The classifier-negative subgroup is the operational population in which additional referral can rescue missed melanomas. Every image in that group retrieves five benign references, making disagreement constant at zero and its AUROC exactly 0.5. Confidence ranks the remaining errors better in this sample, with AUROC 0.8073/0.8213, but those estimates involve only ten/five missed melanomas and have no error-AUROC interval here. The reference policy consequently falls back to its confidence tie-breaker and produces the identical review queue. An overall error AUROC near 0.98 therefore supplies no measured incremental false-negative rescue. These are post-final descriptive checks; no score was inverted, threshold retuned or policy selected from their outcomes.
 
 ### Paired Differences and Uncertainty
 
@@ -189,17 +230,17 @@ The workload interval includes zero, so 101 fewer reviews does not establish a g
 
 ## Five Current Failure Autopsies
 
-These five selection errors concern the frozen augmented Siamese model and were selected before final scoring. They comprise one false negative and four false positives. Scores are compared with binary threshold `2.0640130e-6`; all retrieved references come from fitting patients. Each figure displays the nearest reference, while neighbour fractions use all five. Observations are hypotheses about failure triggers, not causal explanations or clinical diagnoses.
+These five selection errors concern the frozen augmented Siamese model: two false negatives and three false positives. The report revision after final scoring added a rescued false negative to four retained examples; no model, gallery or decision rule changed. Scores are compared with binary threshold `2.0640130e-6`; all retrieved references come from fitting patients. Each figure displays the nearest reference, while neighbour fractions use all five. The figure's `decision` is the checkpoint's three-way score band; rescue statements refer to the separately saved extended review queues. These illustrative cases do not estimate failure prevalence. Observations are hypotheses about failure triggers, not causal explanations or clinical diagnoses.
 
 **1. `ISIC_5137933`: false negative, score 5.086e-09.** The image contains a pale pink/yellow field with subtle boundaries, fine red structures and a dark dermoscopic frame. All five references are benign, and neither review policy rescues the case. Low-contrast morphology and framing are plausible challenges; no intervention establishes their causal role. Agreement reinforces an incorrect benign decision.
 
-**2. `ISIC_7486266`: false positive, score 0.9993.** A pink lesion with visible ruler markings and sparse hair retrieves five melanoma references. The nearest reference also has a pink central region. Broad colour similarity or imaging artifacts may contribute, but the evidence cannot distinguish them. Complete neighbour agreement does not validate the predicted diagnosis.
+**2. `ISIC_1440985`: false negative rescued by referral, score 1.672e-06.** Scattered brown patches lie across a pale, yellow-toned field, without a strong isolated border. The nearest benign reference has a compact dark centre and a pink background; all five references are benign. The classifier score is below its binary threshold, but its confidence uncertainty, -3.9245e-7, exceeds the frozen referral cutoff of -1.2998e-6, so both queues route it for review. Border and colour variability are plausible challenges. The measured rescue comes from confidence ranking, with no contribution from reference disagreement; it is referral, not a corrected melanoma diagnosis.
 
 ![Selection cases 1–2 and their nearest fitting references](figures/aug_siamese_cases_1.svg)
 
-**3. `ISIC_2222264`: false positive, score 0.997.** The query shows diffuse, patchy brown pigmentation on a pale background. It retrieves melanoma references that vary substantially in colour and appearance. This illustrates visual class overlap and the limits of treating embedding proximity as an explanation; a specific pigment shortcut has not been established.
+**3. `ISIC_7486266`: false positive, score 0.9993.** A pink lesion with visible ruler markings and sparse hair retrieves five melanoma references. The nearest reference also has a pink central region. Broad colour similarity or imaging artifacts may contribute, but the evidence cannot distinguish them. Complete neighbour agreement does not validate the predicted diagnosis. This classifier-positive error enters both review queues automatically.
 
-**4. `ISIC_5120795`: false positive, score 0.9545.** A brown lesion is shown with surrounding skin, ruler markings and hair. Reference composition and lesion scale differ. Framing and artifact sensitivity warrant controlled future investigation, while the current evidence only establishes the error and unanimous melanoma neighbours.
+**4. `ISIC_2222264`: false positive, score 0.997.** The query shows diffuse, patchy brown pigmentation on a pale background. It retrieves melanoma references that vary substantially in colour and appearance. This illustrates visual class overlap and the limits of treating embedding proximity as an explanation; a specific pigment shortcut has not been established. Both policies review it because the binary classifier flags it.
 
 ![Selection cases 3–4 and their nearest fitting references](figures/aug_siamese_cases_2.svg)
 
@@ -235,6 +276,18 @@ Retain the classification-only model as the simpler research reference. At the f
 Neither model supports autonomous benign clearing. Approximately half of final images require review to capture 71/74 melanomas, and three melanomas remain outside the queue. Capture assumes referral, not measured human diagnostic accuracy. The substantial AP drop from selection, tiny operating thresholds, repeated minority exposure, one training seed and absence of external validation limit transferability. The final evaluation has been consumed; changing the model or policy would require a newly justified evaluation design rather than retuning against these final labels.
 
 Future work could investigate loss design, lesion-preserving augmentation, additional independent melanoma cases and repeated training seeds. These are proposed studies, not measured gains. The present submission's conclusion is a bounded negative result about this Siamese/reference formulation under the frozen protocol.
+
+### Feasibility Acceptance-Criteria Outcomes
+
+| Criterion from the feasibility review | Outcome | Evidence and remaining limit |
+| :--- | :--- | :--- |
+| 1: Patient separation | Met for current models | Frozen fitting, selection, calibration and final patient sets are disjoint. Historical use of final patients remains disclosed. |
+| 2: Accuracy and class-aware metrics | Evaluation complete; detection limited | Accuracy at 0.5 is 97.95%/97.99%, but melanoma recall is only 13.51%/6.76%. Both classes' metrics, macro-F1, AUROC and PR evidence are reported. |
+| 3: Calibration targets | Met on calibration; final recall varies | Both calibration binary rules capture 45/50 and extended queues capture 48/50. Final binary recall is 86.49%/93.24%; extended capture is 71/74 with interval [91.25%, 100.00%]. |
+| 4: Referral comparison and failure analysis | Complete; no added benefit demonstrated | Confidence/reference queues coincide. Two false negatives and three false positives show a confidence rescue, an unrescued melanoma and avoidable benign reviews. Retain the simpler baseline as the research reference. |
+| 5: Local budget and profiling | Budget met; MPS peak unmeasured | Historical pilots took about 28 minutes and 1.2 GiB RSS; full runs took 2.68/2.57 hours and 1.285/1.355 GiB. Parameters and inference cost are measured. RSS and current MPS allocation do not establish peak GPU memory. |
+
+The prototype meets the current data-separation and local-execution constraints and completes the requested investigation. Its accuracy target and calibrated sample capture do not establish safe automatic benign clearing. The operational recommendation follows the measured workload and missed melanomas rather than treating reporting completion as clinical success.
 
 ## Reproducibility and Usage
 
@@ -315,30 +368,39 @@ python -m recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation \
   --output recognition/Siamese_ISIC2020_Melanoma_47472442/figures/aug_baseline_final_roc_pr.svg
 ```
 
-Architecture and selected autopsies also regenerate without loading a model:
+Architecture, current PCA maps and selected autopsies also regenerate without loading a model:
 
 ```python
 from pathlib import Path
+import numpy as np
 from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
-    plot_model_architecture, plot_saved_reference_cases,
+    plot_embedding_map, plot_model_architecture, plot_saved_reference_cases,
 )
 
 figures = Path("recognition/Siamese_ISIC2020_Melanoma_47472442/figures")
+for model in ("baseline", "siamese"):
+    run = Path("data/runs") / f"resnet18_{model}_imagenet_aug_30ep_seed42"
+    arrays = np.load(run / "diagnostics/selection/embeddings.npz")
+    plot_embedding_map(
+        arrays["reference_embeddings"], arrays["reference_labels"],
+        arrays["query_embeddings"], arrays["query_labels"],
+        figures / f"aug_{model}_selection_embeddings.svg", "selection",
+    )
 folder = Path("data/runs/resnet18_siamese_imagenet_aug_30ep_seed42/diagnostics/selection")
 plot_model_architecture(figures / "architecture.svg")
 plot_saved_reference_cases(
-    folder, ["ISIC_5137933", "ISIC_7486266"], Path("data/train"),
+    folder, ["ISIC_5137933", "ISIC_1440985"], Path("data/train"),
     figures / "aug_siamese_cases_1.svg",
 )
 ```
 
-`plot_training_history` reads saved histories; `plot_referral_workload` and `plot_statistical_comparison` consume saved curve and summary rows. Significant-digit score labels preserve tiny thresholds rather than rendering them as rounded zeros. Report source and figures are submitted together; the README PDF export is the Turnitin report.
+`plot_training_history` reads saved histories; `plot_referral_workload` and `plot_statistical_comparison` consume saved curve and summary rows. Conditional error AUROC can be reproduced from `query_diagnostics.csv`: retain `predicted == 0`, set the error outcome to `actual != predicted`, and apply `sklearn.metrics.roc_auc_score` to each saved `confidence_uncertainty` and `neighbor_disagreement` column. Retrieval statistics use `neighbor_melanoma_fraction` with true labels, not classifier predictions. Significant-digit score labels preserve tiny thresholds rather than rendering them as rounded zeros. Report source and figures are submitted together; the README PDF export is the Turnitin report.
 
 ## Artificial Intelligence Usage Disclosure
 
 OpenAI Codex assisted with data loading, code organisation, model/training scaffolding, plotting, reference/referral diagnostics, resource instrumentation, statistical comparison, literature review, experiment planning and report drafting. The author executed the training experiments, including the augmented pair. The author authorised Codex to complete inference, saved-result analysis and report preparation on 25 October 2026 while excluding a full training session.
 
-Codex checked saved identities, ground-truth alignment and artifact hashes, independently recomputed metrics, inspected figures, and ran the frozen final diagnostics, prediction examples and paired patient comparison. Source verification included Ruff, Pyright and compilation; no unit-test suite was added. Historical authorised diagnostic execution is distinct from author-run training. No model or threshold was changed using final outcomes. Previous students' public submissions informed an external review of common mistakes; no student implementation was transplanted. The author remains responsible for reviewing every claim, understanding the loss and inference path, and defending the methodological choices. Clinical correctness and external generalisation have not been validated.
+Codex checked saved identities, ground-truth alignment and artifact hashes, independently recomputed metrics, inspected figures, and ran the frozen final diagnostics, prediction examples and paired patient comparison. After final scoring, Codex also computed descriptive error-ranking and original-space retrieval summaries, generated current PCA maps and revised the selection autopsies from saved artifacts. Source verification included Ruff, Pyright and compilation; no unit-test suite was added. Historical authorised diagnostic execution is distinct from author-run training. No model, gallery or decision rule was changed using final outcomes. Previous students' public submissions informed an external review of common mistakes; no student implementation was transplanted. The author remains responsible for reviewing every claim, understanding the loss and inference path, and defending the methodological choices. Clinical correctness and external generalisation have not been validated.
 
 ## References and Image Attribution
 

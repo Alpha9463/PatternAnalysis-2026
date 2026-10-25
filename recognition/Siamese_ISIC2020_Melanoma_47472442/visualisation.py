@@ -1027,6 +1027,10 @@ def _save_svg(
         figure.savefig(
             output_path, format="svg", bbox_inches="tight", metadata=metadata
         )
+        output_path.write_text(
+            "\n".join(line.rstrip() for line in output_path.read_text().splitlines())
+            + "\n"
+        )
     finally:
         plt.close(figure)
 
