@@ -1,55 +1,58 @@
-"""Shared classifier and metric-learning model for ISIC melanoma triage.
+"""Shared ResNet-18 encoder, melanoma classifier head and Siamese contrastive loss.
 
-Uses Torchvision's ResNet-18 implementation of He et al. (2016):
-https://arxiv.org/abs/1512.03385
-https://docs.pytorch.org/vision/0.28/models/generated/torchvision.models.resnet18.html
+Encoder: He et al., Deep Residual Learning, https://arxiv.org/abs/1512.03385
+Contrastive loss: Hadsell et al., CVPR 2006, https://doi.org/10.1109/CVPR.2006.100
 """
-
-from typing import Literal, cast
 
 import torch
 from torch import nn
-from torch.nn import functional as functional
+from torch.nn import functional as F
 from torchvision.models import ResNet18_Weights, resnet18
 
 
-ModelName = Literal["base", "siamese"]
-
-
 class MelanomaModel(nn.Module):
-    """Classify RGB lesions with Torchvision's ResNet-18 backbone.
+    """ResNet-18 shared by every image: one pass gives class logits and an embedding.
 
-    Parameters
-    ----------
-    weights : torchvision.models.ResNet18_Weights or None, default=None
-        Encoder initialisation; training supplies ImageNet weights. Checkpoint
-        restoration uses ``None`` and loads the saved trained tensors directly.
+    The 512 backbone features feed a linear benign/melanoma classifier; the same
+    features scaled to unit length form the embedding compared between images.
     """
 
-    def __init__(self, weights: ResNet18_Weights | None = None) -> None:
+    def __init__(self, pretrained: bool = False) -> None:
         super().__init__()
-        self.encoder = cast(nn.Module, resnet18(weights=weights))
+        self.encoder = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         self.encoder.fc = nn.Identity()
         self.classifier = nn.Linear(512, 2)
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute classification logits and embeddings in one encoder pass.
-
-        Parameters
-        ----------
-        images : torch.Tensor
-            Normalised RGB images with shape ``[batch, 3, 224, 224]``.
-
-        Returns
-        -------
-        logits : torch.Tensor
-            Benign and melanoma logits from raw backbone features, with shape
-            ``[batch, 2]``.
-        embeddings : torch.Tensor
-            L2-normalised backbone features with shape ``[batch, 512]`` for
-            contrastive learning and reference comparison.
-        """
-
+        """Return ``[batch, 2]`` logits and ``[batch, 512]`` unit-length embeddings."""
         features = self.encoder(images)
-        embeddings = functional.normalize(features, p=2, dim=1)
-        return self.classifier(features), embeddings
+        return self.classifier(features), F.normalize(features, dim=1)
+
+
+def contrastive_loss(embeddings: torch.Tensor, labels: torch.Tensor, margin: float) -> torch.Tensor:
+    """Contrastive loss over every image pair in the batch (Siamese pairs share all weights).
+
+    Same-class pairs are pulled together (squared distance); different-class pairs
+    are pushed until they are at least ``margin`` apart. Positive and negative pair
+    means are added so the many benign-benign pairs do not swamp melanoma pairs.
+    """
+    squared = (2 - 2 * embeddings @ embeddings.T).clamp_min(1e-12)  # unit vectors: |a-b|^2 = 2 - 2a.b
+    same = labels[:, None] == labels[None, :]
+    pairs = torch.ones_like(same).triu(diagonal=1)  # each unordered pair once, no self-pairs
+    positive, negative = (same & pairs).float(), (~same & pairs).float()
+    pull = squared
+    push = F.relu(margin - squared.sqrt()).square()
+    # clamp_min(1) keeps the rare melanoma-free batch from dividing by zero
+    return (pull * positive).sum() / positive.sum().clamp_min(1) + (push * negative).sum() / negative.sum().clamp_min(1)
+
+
+def nearest_references(
+    queries: torch.Tensor, references: torch.Tensor, reference_labels: torch.Tensor, neighbours: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Siamese comparison with labelled training references.
+
+    Returns each query's nearest reference indices ``[queries, neighbours]`` and
+    its reference score: the fraction of those neighbours that are melanoma.
+    """
+    indices = torch.cdist(queries, references).topk(neighbours, largest=False).indices
+    return indices, reference_labels[indices].float().mean(dim=1)

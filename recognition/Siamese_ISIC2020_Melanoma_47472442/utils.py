@@ -1,188 +1,106 @@
-"""Runtime, artifact, profiling, and triage helpers for ISIC experiments."""
+"""Device selection, image scoring, calibration, thresholds and metrics shared by train and predict."""
 
 import random
 import resource
 import sys
-import time
-from collections.abc import Callable, Mapping
-from pathlib import Path
-from typing import Any
+from math import ceil
 
 import numpy as np
 import torch
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
+from torch.utils.data import DataLoader
+
+from .dataset import ISICDataset, Sample
+from .modules import MelanomaModel
 
 
-def set_seed(seed: int = 42) -> None:
-    """Seed Python, NumPy, and PyTorch for repeatable local runs."""
-
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def select_device() -> torch.device:
+    """Prefer CUDA, then Apple MPS, then CPU."""
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        return torch.device("cuda")
+    return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
-def select_device(requested: str = "auto") -> torch.device:
-    """Select CUDA, Apple MPS, or CPU, with an optional explicit choice.
+def image_loader(samples: list[Sample], config: dict, train: bool = False, sampler=None) -> DataLoader:
+    """Batch images with parallel JPEG decoding; workers persist across epochs."""
+    dataset = ISICDataset(samples, config["image_size"], train)
+    return DataLoader(dataset, config["batch_size"], sampler=sampler, num_workers=config["workers"], persistent_workers=True)
 
-    Parameters
-    ----------
-    requested : {"auto", "cpu", "mps", "cuda"}, default="auto"
-        Requested execution device. ``"auto"`` prefers CUDA, then MPS, then
-        CPU.
 
-    Returns
-    -------
-    torch.device
-        Device selected for training and inference.
+@torch.no_grad()
+def score_images(model: MelanomaModel, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, torch.Tensor, np.ndarray]:
+    """Return melanoma logit margins (log-odds), CPU embeddings and labels in loader order."""
+    model.eval()
+    margins, embeddings, labels = [], [], []
+    for images, targets in loader:
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            logits, embedding = model(images.to(device))
+        logits = logits.float()
+        margins.append((logits[:, 1] - logits[:, 0]).cpu())
+        embeddings.append(embedding.float().cpu())
+        labels.append(targets)
+    return torch.cat(margins).numpy(), torch.cat(embeddings), torch.cat(labels).numpy()
+
+
+def fit_platt(margins: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
+    """Platt scaling: fit p = sigmoid(a * margin + b) on calibration patients.
+
+    Ranking is unchanged; probabilities are corrected for the oversampled training
+    prevalence and label smoothing, so thresholds and confidences are interpretable.
     """
-
-    if requested == "auto":
-        requested = (
-            "cuda"
-            if torch.cuda.is_available()
-            else ("mps" if torch.backends.mps.is_available() else "cpu")
-        )
-    return torch.device(requested)
+    model = LogisticRegression(C=1e6).fit(margins[:, None], labels)
+    return float(model.coef_[0, 0]), float(model.intercept_[0])
 
 
-def to_device(data: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """Move a tensor to the selected device."""
-
-    return data.to(device)
+def melanoma_probability(margins: np.ndarray, platt: tuple[float, float]) -> np.ndarray:
+    return 1 / (1 + np.exp(-(platt[0] * margins + platt[1])))
 
 
-def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
-    """Detach a tensor from autograd and move it to CPU memory."""
-
-    return tensor.detach().cpu()
-
-
-def cpu_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
-    """Copy a model state dictionary into CPU tensors for portable loading."""
-
-    return {
-        name: tensor.detach().cpu().clone()
-        for name, tensor in model.state_dict().items()
-    }
+def recall_threshold(labels: np.ndarray, scores: np.ndarray, recall: float) -> float:
+    """Highest threshold that still flags at least ``recall`` of the melanomas (score >= threshold)."""
+    melanoma_scores = np.sort(scores[labels == 1])[::-1]
+    return float(melanoma_scores[ceil(recall * len(melanoma_scores)) - 1])
 
 
-def count_parameters(model: torch.nn.Module) -> int:
-    """Return the number of trainable and non-trainable model parameters."""
-
-    return sum(parameter.numel() for parameter in model.parameters())
-
-
-def save_checkpoint(path: Path, checkpoint: Mapping[str, object]) -> None:
-    """Persist one complete experiment checkpoint under an ignored run directory."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(dict(checkpoint), path)
+def specificity_threshold(labels: np.ndarray, scores: np.ndarray, specificity: float) -> float:
+    """Threshold leaving ``specificity`` of benign images below it."""
+    return float(np.quantile(scores[labels == 0], specificity))
 
 
-def load_checkpoint(
-    path: Path, map_location: torch.device | str | None = None
-) -> dict[str, Any]:
-    """Load the dictionary saved by the training pipeline."""
-
-    return torch.load(path, map_location=map_location)
-
-
-def select_triage_rule(
-    labels: np.ndarray,
-    scores: np.ndarray,
-    target_recall: float,
-    referral_fraction: float = 0.1,
-) -> dict[str, float]:
-    """Derive a validation-only threshold and referral band.
-
-    The threshold is the highest value that retains the requested melanoma
-    recall on validation data. The referral margin covers the closest fraction
-    of validation scores around that threshold.
-    """
-
-    positive_scores = np.sort(scores[labels == 1])[::-1]
-    required_positives = int(np.ceil(target_recall * len(positive_scores)))
-    threshold = float(positive_scores[required_positives - 1])
-    margin = float(np.quantile(np.abs(scores - threshold), referral_fraction))
+def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
+    """Per-class precision/recall/F1, macro-F1, accuracy and confusion counts at one threshold."""
+    predicted = (scores >= threshold).astype(int)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, predicted, labels=[0, 1], zero_division=0)
+    (tn, fp), (fn, tp) = confusion_matrix(labels, predicted, labels=[0, 1])
     return {
         "threshold": threshold,
-        "referral_margin": margin,
-        "target_recall": float(target_recall),
-        "referral_fraction": float(referral_fraction),
+        "accuracy": float(accuracy_score(labels, predicted)),
+        "macro_f1": float(f1.mean()),
+        "benign_precision": float(precision[0]),
+        "benign_recall": float(recall[0]),
+        "melanoma_precision": float(precision[1]),
+        "melanoma_recall": float(recall[1]),
+        "melanoma_f1": float(f1[1]),
+        "flagged_fraction": float(predicted.mean()),
+        "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
     }
 
 
-def apply_triage_rule(score: float, rule: Mapping[str, float]) -> str:
-    """Return the frozen automated decision for one model score."""
-
-    threshold = rule["threshold"]
-    margin = rule["referral_margin"]
-    if score >= threshold + margin:
-        return "melanoma"
-    if score <= threshold - margin:
-        return "benign"
-    return "refer"
+def peak_process_memory_gib() -> float:
+    """Peak resident memory of this process (macOS reports bytes, Linux kilobytes)."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1 if sys.platform == "darwin" else 1024) / 2**30
 
 
-def reset_peak_accelerator_memory(device: torch.device) -> None:
-    """Reset CUDA peak allocation before a command; MPS has no peak counter."""
-
+def accelerator_memory_gib(device: torch.device) -> float:
+    """GPU memory held now: MPS driver allocation (no peak counter exists) or CUDA peak reserved."""
     if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
-
-
-def memory_usage(device: torch.device) -> dict[str, int | None]:
-    """Read process peak RSS and distinct current/peak tensor allocations.
-
-    Parameters
-    ----------
-    device : torch.device
-        Device used by this command.
-
-    Returns
-    -------
-    dict of str to int or None
-        Byte counts. RSS is the process lifetime high-water mark. CUDA peak
-        starts at the last reset; MPS exposes current tensor allocation only.
-        Accelerator counts exclude allocator caches and must not be added to RSS.
-    """
-
-    current = peak = None
-    if device.type == "cuda":
-        current = int(torch.cuda.memory_allocated(device))
-        peak = int(torch.cuda.max_memory_allocated(device))
-    elif device.type == "mps":
-        current = int(torch.mps.current_allocated_memory())
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return {
-        "process_peak_rss_bytes": int(rss) * (1 if sys.platform == "darwin" else 1024),
-        "accelerator_current_allocated_bytes": current,
-        "accelerator_peak_allocated_bytes": peak,
-    }
-
-
-def measure_inference_latency_ms(
-    inference: Callable[[], object],
-    device: torch.device,
-    warmup_iterations: int = 3,
-    repetitions: int = 10,
-) -> float:
-    """Measure mean synchronous inference latency for one fixed input batch."""
-
-    for _ in range(warmup_iterations):
-        inference()
-    start = synchronised_time(device)
-    for _ in range(repetitions):
-        inference()
-    return (synchronised_time(device) - start) * 1000 / repetitions
-
-
-def synchronised_time(device: torch.device) -> float:
-    """Return monotonic seconds after queued accelerator work completes."""
-
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    elif device.type == "mps":
-        torch.mps.synchronize()
-    return time.perf_counter()
+        return torch.cuda.max_memory_reserved() / 2**30
+    return torch.mps.driver_allocated_memory() / 2**30 if device.type == "mps" else 0.0

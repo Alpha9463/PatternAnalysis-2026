@@ -1,367 +1,134 @@
-"""Lazy RGB image loading and patient-separated pairs for ResNet-18.
+"""ISIC 2020 loading, patient-level splits, augmentation and class-balanced sampling.
 
-Images and GroundTruth_v2 metadata default to repository ``data/``. Every
-image uses explicit resize, centre crop and RGB normalisation transforms.
+Images and ``ISIC_2020_Training_GroundTruth_v2.csv`` live under repository ``data/``.
+Create the fixed patient split once with
+``python -m recognition.Siamese_ISIC2020_Melanoma_47472442.dataset``.
 """
 
-import argparse
 import csv
+import json
 import random
-from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import NamedTuple
 
 import torch
 from PIL import Image, ImageOps
-from torch.utils.data import Dataset, Subset
+from torch.utils.data import Dataset, WeightedRandomSampler
 from torchvision import transforms
 
-
-DEFAULT_METADATA_NAME = "ISIC_2020_Training_GroundTruth_v2.csv"
-DEFAULT_ROTATION_DEGREES = 45.0
-DEFAULT_COLOR_JITTER = 0.1
-DEFAULT_TRANSLATION_FRACTION = 0.05
-DEFAULT_SCALE_JITTER = 0.1
-_MEAN = (0.485, 0.456, 0.406)
-_STD = (0.229, 0.224, 0.225)
-_AFFINE_FILL = tuple(round(value * 255) for value in _MEAN)
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+METADATA_CSV = DATA_DIR / "ISIC_2020_Training_GroundTruth_v2.csv"
+SPLIT_FILE = DATA_DIR / "splits" / "isic_protocol.json"
+MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)  # ImageNet RGB statistics
 
 
-def repository_root() -> Path:
-    """Return the PatternAnalysis repository root."""
-
-    return Path(__file__).resolve().parents[2]
-
-
-def default_data_dir() -> Path:
-    """Return the repository-local directory for untracked data."""
-
-    return repository_root() / "data"
-
-
-def model_preprocessing(
-    rotation_degrees: float = DEFAULT_ROTATION_DEGREES,
-    color_jitter: float = DEFAULT_COLOR_JITTER,
-    translation_fraction: float = DEFAULT_TRANSLATION_FRACTION,
-    scale_jitter: float = DEFAULT_SCALE_JITTER,
-) -> dict[str, object]:
-    """Describe inference preprocessing and fitting augmentation for a run.
-
-    Parameters
-    ----------
-    rotation_degrees : float, default=45.0
-        Maximum absolute fitting rotation angle in degrees.
-    color_jitter : float, default=0.1
-        Maximum relative brightness and contrast variation during fitting.
-    translation_fraction : float, default=0.05
-        Maximum horizontal and vertical shifts as fractions of image dimensions.
-    scale_jitter : float, default=0.1
-        Scale factors range from ``1 - scale_jitter`` to ``1 + scale_jitter``.
-
-    Returns
-    -------
-    dict of str to object
-        Fixed RGB input pipeline and configured fitting-only transforms.
-    """
-
-    return {
-        "image_size": 224,
-        "color_mode": "RGB",
-        "resize_shorter_side": 256,
-        "resize": "bilinear",
-        "antialias": True,
-        "crop": "center",
-        "scaling": "float32_0_1",
-        "normalization": {"mean": list(_MEAN), "std": list(_STD)},
-        "exif_transpose": True,
-        "layout": "CHW",
-        "fitting_augmentation": {
-            "horizontal_flip_probability": 0.5,
-            "vertical_flip_probability": 0.5,
-            "rotation_degrees": rotation_degrees,
-            "translation_fraction": translation_fraction,
-            "scale_range": [1 - scale_jitter, 1 + scale_jitter],
-            "affine_interpolation": "bilinear",
-            "affine_fill": list(_AFFINE_FILL),
-            "brightness": color_jitter,
-            "contrast": color_jitter,
-        },
-    }
-
-
-@dataclass(frozen=True)
-class ISICSample:
-    """Image identifier, patient, binary label and JPEG path."""
-
+class Sample(NamedTuple):
     image_name: str
     patient_id: str
-    label: int
+    label: int  # 0 benign, 1 melanoma
     path: Path
 
 
-class ISICImageDataset(Dataset):
-    """Load ISIC RGB images with fixed resize, crop and normalisation.
+def read_samples(metadata_csv: Path = METADATA_CSV) -> list[Sample]:
+    """Read labelled images in CSV order, locating each JPEG anywhere under ``data/``."""
+    paths = {path.stem: path for path in DATA_DIR.rglob("*.jpg")}
+    with metadata_csv.open(newline="") as stream:
+        return [
+            Sample(row["image_name"], row["patient_id"], int(row["target"]), paths[row["image_name"]])
+            for row in csv.DictReader(stream)
+        ]
 
-    Parameters
-    ----------
-    images_dir, metadata_csv : str or pathlib.Path or None, default=None
-        Extracted JPEG root and GroundTruth_v2 CSV. ``None`` searches
-        repository ``data/``.
-    training : bool, default=False
-        Apply fitting-only augmentation after resize and before centre crop.
-    rotation_degrees : float, default=45.0
-        Maximum absolute random rotation angle for fitting images.
-    color_jitter : float, default=0.1
-        Relative brightness and contrast variation for fitting images.
-    translation_fraction : float, default=0.05
-        Maximum horizontal and vertical shifts as fractions of image dimensions.
-    scale_jitter : float, default=0.1
-        Relative variation around a scale factor of one for fitting images.
 
-    Attributes
-    ----------
-    samples : list of ISICSample
-        CSV records with patient IDs and JPEG paths; pixels are loaded lazily.
+def _split_patients(labels: dict[str, int], fractions: tuple[float, ...], seed: int) -> list[list[str]]:
+    """Shuffle melanoma and melanoma-free patients separately, cut off each fraction, keep the rest last."""
+    rng = random.Random(seed)
+    groups: list[list[str]] = [[] for _ in range(len(fractions) + 1)]
+    for label in (0, 1):
+        patients = sorted(patient for patient, target in labels.items() if target == label)
+        rng.shuffle(patients)
+        start = 0
+        for group, fraction in zip(groups, fractions):
+            count = round(len(patients) * fraction)
+            group.extend(patients[start : start + count])
+            start += count
+        groups[-1].extend(patients[start:])
+    return [sorted(group) for group in groups]
+
+
+def create_splits(samples: list[Sample], output: Path = SPLIT_FILE) -> None:
+    """Assign whole patients to roles, stratified by whether the patient has any melanoma.
+
+    ``development`` patients were examined in early experiments; they now only add
+    training data (see ``load_splits``) and are never used for evaluation.
     """
+    labels: dict[str, int] = {}
+    for sample in samples:
+        labels[sample.patient_id] = max(labels.get(sample.patient_id, 0), sample.label)
+    tuning, development, pool = _split_patients(labels, (0.15, 0.15), 42)
+    final, fit = _split_patients({p: labels[p] for p in pool}, (0.2,), 20261007)
+    calibration, selection = _split_patients({p: labels[p] for p in tuning}, (0.5,), 20261008)
+    partitions = dict(fit=fit, selection=selection, calibration=calibration, final=final, development=development)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps({"partitions": partitions}, indent=2) + "\n")
 
-    def __init__(
-        self,
-        images_dir: str | Path | None = None,
-        metadata_csv: str | Path | None = None,
-        training: bool = False,
-        rotation_degrees: float = DEFAULT_ROTATION_DEGREES,
-        color_jitter: float = DEFAULT_COLOR_JITTER,
-        translation_fraction: float = DEFAULT_TRANSLATION_FRACTION,
-        scale_jitter: float = DEFAULT_SCALE_JITTER,
-    ) -> None:
-        self.images_dir = (
-            Path(images_dir).expanduser() if images_dir else default_data_dir()
-        )
-        self.metadata_csv = (
-            Path(metadata_csv).expanduser()
-            if metadata_csv
-            else next(default_data_dir().rglob(DEFAULT_METADATA_NAME))
-        )
-        augmentation = (
+
+def load_splits(samples: list[Sample], split_file: Path = SPLIT_FILE) -> dict[str, list[Sample]]:
+    """Return image samples for ``train``, ``selection``, ``calibration`` and ``final`` patients."""
+    partitions = json.loads(split_file.read_text())["partitions"]
+    roles = {
+        "train": set(partitions["fit"] + partitions["development"]),
+        "selection": set(partitions["selection"]),
+        "calibration": set(partitions["calibration"]),
+        "final": set(partitions["final"]),
+    }
+    return {role: [s for s in samples if s.patient_id in patients] for role, patients in roles.items()}
+
+
+class ISICDataset(Dataset):
+    """Decode, augment (training only) and normalise lesion images to ``image_size`` squares."""
+
+    def __init__(self, samples: list[Sample], image_size: int, train: bool = False) -> None:
+        self.samples = samples
+        self.image_size = image_size
+        geometry = (
             [
+                # Random crops of 35-100% of the image vary scale and position of the lesion
+                transforms.RandomResizedCrop(image_size, scale=(0.35, 1.0)),
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomVerticalFlip(),
-                transforms.RandomAffine(
-                    rotation_degrees,
-                    translate=(translation_fraction, translation_fraction),
-                    scale=(1 - scale_jitter, 1 + scale_jitter),
-                    interpolation=transforms.InterpolationMode.BILINEAR,
-                    # Torchvision accepts RGB fills despite its scalar annotation.
-                    fill=cast(Any, _AFFINE_FILL),
-                ),
-                transforms.ColorJitter(brightness=color_jitter, contrast=color_jitter),
+                transforms.RandomRotation(45, fill=[round(255 * m) for m in MEAN]),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02),
             ]
-            if training
-            else []
+            if train
+            else [transforms.Resize(image_size), transforms.CenterCrop(image_size)]
         )
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize(256, antialias=True),
-                *augmentation,
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(_MEAN, _STD),
-            ]
-        )
-        image_paths = {
-            path.stem: path
-            for path in self.images_dir.rglob("*")
-            if path.suffix.lower() in {".jpg", ".jpeg"}
-        }
-        with self.metadata_csv.open(newline="", encoding="utf-8-sig") as stream:
-            self.samples = [
-                ISICSample(
-                    row["image_name"],
-                    row["patient_id"],
-                    int(row["target"]),
-                    image_paths[row["image_name"]],
-                )
-                for row in csv.DictReader(stream)
-            ]
+        self.transform = transforms.Compose([*geometry, transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
 
     def __len__(self) -> int:
-        """Return the number of labelled images."""
-
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Load one image and label.
-
-        Parameters
-        ----------
-        index : int
-            Position in the metadata records.
-
-        Returns
-        -------
-        image : torch.Tensor
-            Normalised float32 RGB tensor with shape [3, 224, 224].
-        label : torch.Tensor
-            Int64 scalar: benign (0) or melanoma (1).
-        """
-
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         sample = self.samples[index]
-        with Image.open(sample.path) as source:
-            image = ImageOps.exif_transpose(source).convert("RGB")
-        return cast(torch.Tensor, self.transform(image)), torch.tensor(
-            sample.label, dtype=torch.long
-        )
+        with Image.open(sample.path) as image:
+            # JPEG draft mode decodes straight to >= image_size: ~4x faster on 6000x4000 photos
+            image.draft("RGB", (self.image_size, self.image_size))
+            image = ImageOps.exif_transpose(image).convert("RGB")
+        return self.transform(image), sample.label
 
 
-class SiamesePairDataset(Dataset):
-    """Draw balanced same-label and different-label pairs from training data.
+def melanoma_sampler(samples: list[Sample], melanoma_fraction: float, seed: int) -> WeightedRandomSampler:
+    """Draw one epoch of ``len(samples)`` images, a ``melanoma_fraction`` share of them melanoma.
 
-    Parameters
-    ----------
-    subset : torch.utils.data.Subset
-        Patient-separated training subset of an ISICImageDataset.
-    pairs_per_epoch : int or None, default=None
-        Number of sampled pairs per epoch. Defaults to the number of images.
-    seed : int, default=42
-        Base seed for reproducible pair selection.
-
-    Notes
-    -----
-    Pair members always come from different patients. Call ``set_epoch``
-    before each training epoch to draw a new deterministic set of pairs.
-    Pair indices are materialised before loading so coverage describes the
-    same stream used by the complete training loader.
-    Each image's class label is returned for classification; matching labels
-    identify positive pairs for the contrastive objective.
+    Moderate oversampling keeps melanomas in most batches (needed for contrastive
+    pairs) without repeating the few training melanomas so often they are memorised.
     """
-
-    def __init__(
-        self, subset: Subset, pairs_per_epoch: int | None = None, seed: int = 42
-    ) -> None:
-        self.dataset = cast(ISICImageDataset, subset.dataset)
-        self.indices = list(subset.indices)
-        self.pairs_per_epoch = (
-            len(self.indices) if pairs_per_epoch is None else pairs_per_epoch
-        )
-        self.seed = seed
-        self.epoch = 0
-        self.by_label: dict[int, dict[str, list[int]]] = {
-            0: defaultdict(list),
-            1: defaultdict(list),
-        }
-        for index in self.indices:
-            sample = self.dataset.samples[index]
-            self.by_label[sample.label][sample.patient_id].append(index)
-        self.set_epoch(0)
-
-    def set_epoch(self, epoch: int) -> None:
-        """Select a reproducible pair stream for an epoch.
-
-        Parameters
-        ----------
-        epoch : int
-            Zero-based training epoch.
-        """
-
-        self.epoch = epoch
-        self.pair_indices = [self._sample_indices(index) for index in range(len(self))]
-
-    def sampling_coverage(self) -> dict[str, float]:
-        """Count unique fitting examples in this epoch's complete pair stream.
-
-        Returns
-        -------
-        dict of str to float
-            Unique benign images, melanoma images and melanoma patients. Counts
-            use the exact preselected indices loaded by the training DataLoader.
-        """
-
-        indices = {index for pair in self.pair_indices for index in pair}
-        samples = [self.dataset.samples[index] for index in indices]
-        melanomas = [sample for sample in samples if sample.label == 1]
-        return {
-            "sampled_benign_images": float(len(samples) - len(melanomas)),
-            "sampled_melanoma_images": float(len(melanomas)),
-            "sampled_melanoma_patients": float(
-                len({sample.patient_id for sample in melanomas})
-            ),
-        }
-
-    def _sample_indices(self, index: int) -> tuple[int, int]:
-        """Choose fitting indices using this epoch's per-pair RNG seed.
-
-        Parameters
-        ----------
-        index : int
-            Pair position within this epoch.
-
-        Returns
-        -------
-        tuple of int
-            Dataset indices from different patients with the selected labels.
-        """
-
-        rng = random.Random(self.seed + self.epoch * self.pairs_per_epoch + index)
-        first_label = rng.randrange(2)
-        same = index % 2 == 0
-        second_label = first_label if same else 1 - first_label
-        first_patient = rng.choice(sorted(self.by_label[first_label]))
-        possible_second = sorted(
-            pid for pid in self.by_label[second_label] if pid != first_patient
-        )
-        second_patient = rng.choice(possible_second)
-        return (
-            rng.choice(self.by_label[first_label][first_patient]),
-            rng.choice(self.by_label[second_label][second_patient]),
-        )
-
-    def __len__(self) -> int:
-        """Return the number of pairs drawn per epoch."""
-
-        return self.pairs_per_epoch
-
-    def __getitem__(
-        self, index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Load a cross-patient image pair and both class labels.
-
-        Parameters
-        ----------
-        index : int
-            Pair position in this epoch.
-
-        Returns
-        -------
-        first : torch.Tensor
-            First RGB image.
-        second : torch.Tensor
-            Second RGB image from a different patient.
-        first_label : torch.Tensor
-            First image's int64 class label: benign (0) or melanoma (1).
-        second_label : torch.Tensor
-            Second image's int64 class label: benign (0) or melanoma (1).
-        """
-
-        first_index, second_index = self.pair_indices[index]
-        first, first_label_tensor = self.dataset[first_index]
-        second, second_label_tensor = self.dataset[second_index]
-        return first, second, first_label_tensor, second_label_tensor
-
-
-def main() -> None:
-    """Print the record count and first preprocessed image's shape and label."""
-
-    parser = argparse.ArgumentParser(description="Inspect the local ISIC dataset")
-    parser.add_argument("images_dir", type=Path, nargs="?")
-    parser.add_argument("metadata_csv", type=Path, nargs="?")
-    args = parser.parse_args()
-    dataset = ISICImageDataset(args.images_dir, args.metadata_csv)
-    image, label = dataset[0]
-    print(f"Loaded {len(dataset)} records")
-    print(f"First image: {dataset.samples[0].image_name}")
-    print(f"Shape: {tuple(image.shape)}, label: {int(label)}")
+    melanomas = sum(s.label for s in samples)
+    weights = [melanoma_fraction / melanomas if s.label else (1 - melanoma_fraction) / (len(samples) - melanomas) for s in samples]
+    return WeightedRandomSampler(weights, len(samples), generator=torch.Generator().manual_seed(seed))
 
 
 if __name__ == "__main__":
-    main()
+    all_samples = read_samples()
+    create_splits(all_samples)
+    for role, group in load_splits(all_samples).items():
+        print(f"{role}: {len(group)} images, {len({s.patient_id for s in group})} patients, {sum(s.label for s in group)} melanomas")

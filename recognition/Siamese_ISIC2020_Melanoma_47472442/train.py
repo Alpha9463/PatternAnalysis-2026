@@ -1,636 +1,159 @@
-"""Train, validate, profile, and save ISIC melanoma models.
+"""Train the baseline or Siamese model, keep the best epoch and freeze its decision rules.
 
-Run from the repository root::
+    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
+        recognition/Siamese_ISIC2020_Melanoma_47472442/configs/siamese.yaml
 
-    /Users/alexanderson/venvs/comp3710/bin/python -m \
-      recognition.Siamese_ISIC2020_Melanoma_47472442.train \
-      --config recognition/Siamese_ISIC2020_Melanoma_47472442/configs/baseline.yaml
-
-Selection patients choose the best checkpoint; separate calibration patients
-choose the triage rule. Final patients are scored only by an explicit
-``predict --partition final --evaluate-final`` command after the run is frozen.
+Selection patients choose the epoch; calibration patients fit the probability
+scaling, thresholds and reference gallery rule. Final patients are never loaded
+here; ``predict.py`` scores them with the frozen checkpoint.
 """
 
 import argparse
 import copy
-import csv
 import json
+import random
 import time
-from collections.abc import Sequence
-from functools import partial
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    confusion_matrix,
-    log_loss,
-    roc_auc_score,
-)
-from torch import nn
-from torch.nn import functional as functional
-from torch.utils.data import DataLoader, Subset
-from torchvision.models import ResNet18_Weights
+import yaml
+from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
+from torch.nn import functional as F
 
-from recognition.Siamese_ISIC2020_Melanoma_47472442.config import (
-    RunConfig,
-    load_run_config,
-)
-from recognition.Siamese_ISIC2020_Melanoma_47472442.dataset import (
-    ISICImageDataset,
-    SiamesePairDataset,
-    model_preprocessing,
-)
-from recognition.Siamese_ISIC2020_Melanoma_47472442.protocol import (
-    ProtocolIndices,
-    load_protocol_manifest,
-    partition_summary,
-    protocol_identity,
-)
-from recognition.Siamese_ISIC2020_Melanoma_47472442.provenance import (
-    effective_config,
-    file_sha256,
-)
-from recognition.Siamese_ISIC2020_Melanoma_47472442.modules import (
-    MelanomaModel,
-)
-from recognition.Siamese_ISIC2020_Melanoma_47472442.utils import (
-    apply_triage_rule,
-    cpu_state_dict,
-    count_parameters,
-    measure_inference_latency_ms,
-    memory_usage,
-    reset_peak_accelerator_memory,
-    save_checkpoint,
+from .dataset import DATA_DIR, Sample, load_splits, melanoma_sampler, read_samples
+from .modules import MelanomaModel, contrastive_loss, nearest_references
+from .utils import (
+    accelerator_memory_gib,
+    fit_platt,
+    image_loader,
+    melanoma_probability,
+    peak_process_memory_gib,
+    recall_threshold,
+    score_images,
     select_device,
-    select_triage_rule,
     set_seed,
-    synchronised_time,
-    to_cpu,
-    to_device,
+    specificity_threshold,
+    threshold_metrics,
 )
-from recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation import (
-    plot_training_history,
-)
+from .visualisation import plot_training_history
 
 
-def train_epoch(
-    model: MelanomaModel,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    contrastive_weight: float,
-    margin: float,
-    train_encoder: bool = True,
-) -> dict[str, float]:
-    """Fit one epoch on identical paired-image batches for either objective.
-
-    Parameters
-    ----------
-    model : MelanomaModel
-        Shared encoder, raw-feature classifier and normalised feature embeddings.
-    loader : torch.utils.data.DataLoader
-        Fitting-only pairs with each member's image label.
-    optimizer : torch.optim.Optimizer
-        Optimiser shared by both experiment configurations.
-    device : torch.device
-        Training device.
-    contrastive_weight, margin : float
-        Contrastive multiplier and different-class distance margin. A zero
-        multiplier gives the classification-only ablation.
-    train_encoder : bool, default=True
-        Update the encoder. ``False`` freezes its weights and BatchNorm running
-        statistics while the classifier learns during head warmup.
-
-    Returns
-    -------
-    dict of str to float
-        Mean losses, same/different pair distances and active-negative fraction.
-
-    References
-    ----------
-    .. [1] Hadsell, Chopra and LeCun, "Dimensionality Reduction by Learning an
-       Invariant Mapping," CVPR, 2006. https://doi.org/10.1109/CVPR.2006.100
-       The contrastive term uses same-label=1 and omits the constant factor 1/2.
-    """
-
+def train_epoch(model, loader, optimizer, scheduler, device, config) -> dict[str, float]:
+    """One pass of cross-entropy plus weighted contrastive loss (weight 0 for the baseline)."""
     model.train()
-    model.encoder.requires_grad_(train_encoder)
-    if not train_encoder:
-        model.encoder.eval()
-    criterion = nn.CrossEntropyLoss()
-    totals = {"train_loss": 0.0, "classification_loss": 0.0, "contrastive_loss": 0.0}
-    seen = 0
-    same_pairs = 0
-    same_distance = 0.0
-    different_distance = 0.0
-    active_negatives = 0.0
-    for first, second, first_targets, second_targets in loader:
-        images = to_device(torch.cat((first, second)), device)
-        labels = to_device(torch.cat((first_targets, second_targets)), device)
+    totals = np.zeros(2)
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            logits, embeddings = model(images)
+        cross_entropy = F.cross_entropy(logits.float(), labels, label_smoothing=config["label_smoothing"])
+        contrastive = contrastive_loss(embeddings.float(), labels, config["contrastive_margin"])
+        loss = cross_entropy + config["contrastive_weight"] * contrastive
         optimizer.zero_grad(set_to_none=True)
-        logits, embeddings = model(images)
-        first_embedding, second_embedding = embeddings.chunk(2)
-        distance = functional.pairwise_distance(first_embedding, second_embedding)
-        same = (first_targets == second_targets).to(device=device, dtype=torch.float32)
-        classification_loss = criterion(logits, labels)
-        contrastive_loss = (
-            same * distance.square()
-            + (1 - same) * functional.relu(margin - distance).square()
-        ).mean()
-        loss = classification_loss + contrastive_weight * contrastive_loss
         loss.backward()
         optimizer.step()
-        batch_pairs = len(first_targets)
-        totals["train_loss"] += loss.item() * batch_pairs
-        totals["classification_loss"] += classification_loss.item() * batch_pairs
-        totals["contrastive_loss"] += contrastive_loss.item() * batch_pairs
-        distances = distance.detach()
-        same_pairs += int(same.sum().item())
-        same_distance += (distances * same).sum().item()
-        different_distance += (distances * (1 - same)).sum().item()
-        active_negatives += ((distances < margin) * (1 - same)).sum().item()
-        seen += batch_pairs
-    return {
-        **{name: value / seen for name, value in totals.items()},
-        "same_pair_distance": same_distance / same_pairs,
-        "different_pair_distance": different_distance / (seen - same_pairs),
-        "active_negative_fraction": active_negatives / (seen - same_pairs),
-    }
+        scheduler.step()
+        totals += (cross_entropy.item(), contrastive.item())
+    cross_entropy, contrastive = totals / len(loader)
+    return {"train_cross_entropy": cross_entropy, "train_contrastive": contrastive}
 
 
-@torch.no_grad()
-def score_model(
-    model: MelanomaModel, loader: DataLoader, device: torch.device
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return image-level melanoma softmax scores and labels for either model."""
-
-    model.eval()
-    scores: list[float] = []
-    labels: list[int] = []
-    for images, targets in loader:
-        logits, _ = model(to_device(images, device))
-        scores.extend(to_cpu(logits.softmax(dim=1)[:, 1]).tolist())
-        labels.extend(targets.tolist())
-    return np.asarray(scores), np.asarray(labels, dtype=np.int64)
-
-
-def classification_metrics(
-    labels: np.ndarray, scores: np.ndarray, threshold: float
-) -> dict[str, object]:
-    """Summarise classification and ranking metrics for one fixed threshold."""
-
-    predictions = (scores >= threshold).astype(np.int64)
-    matrix = confusion_matrix(labels, predictions, labels=[0, 1])
-    per_class: dict[str, dict[str, float | int]] = {}
-    f1_scores: list[float] = []
-    for index, name in enumerate(("benign", "melanoma")):
-        true_positive = int(matrix[index, index])
-        false_positive = int(matrix[1 - index, index])
-        false_negative = int(matrix[index, 1 - index])
-        support = true_positive + false_negative
-        precision = (
-            true_positive / (true_positive + false_positive)
-            if true_positive + false_positive
-            else 0.0
-        )
-        recall = true_positive / support if support else 0.0
-        f1 = (
-            2 * precision * recall / (precision + recall) if precision + recall else 0.0
-        )
-        per_class[name] = {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "support": support,
-        }
-        f1_scores.append(f1)
-    return {
-        "threshold": threshold,
-        "accuracy": float(accuracy_score(labels, predictions)),
-        "macro_f1": float(np.mean(f1_scores)),
-        "roc_auc": float(roc_auc_score(labels, scores)),
-        "melanoma_average_precision": float(average_precision_score(labels, scores)),
-        "confusion_matrix": matrix.tolist(),
-        "per_class": per_class,
-    }
-
-
-def parse_run_config(argv: Sequence[str] | None = None) -> RunConfig:
-    """Parse YAML settings and explicit command-line overrides for one run."""
-
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--config", type=Path, metavar="PATH", default=None)
-    parser.add_argument(
-        "--model", choices=("base", "siamese"), default=argparse.SUPPRESS
-    )
-    parser.add_argument("--run-name", default=argparse.SUPPRESS)
-    parser.add_argument("--images-dir", type=Path, default=argparse.SUPPRESS)
-    parser.add_argument("--metadata-csv", type=Path, default=argparse.SUPPRESS)
-    parser.add_argument("--output-dir", type=Path, default=argparse.SUPPRESS)
-    parser.add_argument("--protocol-manifest", type=Path, default=argparse.SUPPRESS)
-    parser.add_argument("--epochs", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--head-warmup-epochs", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--learning-rate", type=float, default=argparse.SUPPRESS)
-    parser.add_argument(
-        "--encoder-learning-rate", type=float, default=argparse.SUPPRESS
-    )
-    parser.add_argument("--min-learning-rate", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--weight-decay", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--rotation-degrees", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--color-jitter", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--translation-fraction", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--scale-jitter", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--target-recall", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--pairs-per-epoch", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--contrastive-weight", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--contrastive-margin", type=float, default=argparse.SUPPRESS)
-    parser.add_argument(
-        "--device",
-        choices=("auto", "cpu", "mps", "cuda"),
-        default=argparse.SUPPRESS,
-    )
-    parsed = vars(parser.parse_args(argv))
-    config_path = parsed.pop("config")
-    return load_run_config(config_path, parsed)
-
-
-@dataclass(frozen=True)
-class TrainingData:
-    """Dataset views allowed during fitting, selection and calibration.
-
-    Attributes
-    ----------
-    fit, selection, calibration : torch.utils.data.Subset
-        Fitting uses augmented images; all other views are deterministic.
-    dataset : ISICImageDataset
-        Deterministic metadata/image view used for reporting.
-    indices : ProtocolIndices
-        Frozen role membership. Final indices are never made into a loader here.
-    """
-
-    fit: Subset
-    selection: Subset
-    calibration: Subset
-    dataset: ISICImageDataset
-    indices: ProtocolIndices
-
-
-def build_datasets(args: RunConfig) -> TrainingData:
-    """Load the frozen protocol and create development-only dataset views.
-
-    Parameters
-    ----------
-    args : RunConfig
-        Effective training settings including the existing protocol path.
-
-    Returns
-    -------
-    TrainingData
-        Fitting, selection and calibration views, without a final loader.
-    """
-
-    dataset = ISICImageDataset(args.images_dir, args.metadata_csv)
-    indices = load_protocol_manifest(dataset, args.protocol_manifest)
-    augmented = ISICImageDataset(
-        args.images_dir,
-        args.metadata_csv,
-        training=True,
-        rotation_degrees=args.rotation_degrees,
-        color_jitter=args.color_jitter,
-        translation_fraction=args.translation_fraction,
-        scale_jitter=args.scale_jitter,
-    )
-    return TrainingData(
-        fit=Subset(augmented, list(indices.fit)),
-        selection=Subset(dataset, list(indices.selection)),
-        calibration=Subset(dataset, list(indices.calibration)),
-        dataset=dataset,
-        indices=indices,
-    )
-
-
-@torch.no_grad()
-def profile_model(
-    model: MelanomaModel,
-    selection_loader: DataLoader,
-    device: torch.device,
-) -> dict[str, object]:
-    """Measure a preloaded batch forward, excluding loading and transfers."""
-
-    images, _ = next(iter(selection_loader))
-    device_images = to_device(images, device)
-    model.eval()
-
-    return {
-        "parameter_count": count_parameters(model),
-        "inference_latency_ms": measure_inference_latency_ms(
-            partial(model, device_images), device, warmup_iterations=3, repetitions=10
-        ),
-        "latency_batch_images": len(images),
-        "latency_warmup_batches": 3,
-        "latency_measured_batches": 10,
-        "latency_scope": "preloaded_device_batch_classifier_and_embedding_forward",
-    }
-
-
-def write_predictions(
-    path: Path,
-    dataset: ISICImageDataset,
-    subset: Subset,
-    labels: np.ndarray,
-    scores: np.ndarray,
-    decision_rule: dict[str, float],
-) -> None:
-    """Write held-out image scores and frozen triage decisions as CSV."""
-
-    with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.writer(stream)
-        writer.writerow(
-            ("image_name", "patient_id", "actual", "score", "predicted", "decision")
-        )
-        for index, actual, score in zip(subset.indices, labels, scores):
-            sample = dataset.samples[index]
-            writer.writerow(
-                (
-                    sample.image_name,
-                    sample.patient_id,
-                    int(actual),
-                    float(score),
-                    int(score >= decision_rule["threshold"]),
-                    apply_triage_rule(float(score), decision_rule),
-                )
-            )
+def reference_gallery(train: list[Sample], seed: int) -> list[Sample]:
+    """Every training melanoma plus an equal number of random training benign images."""
+    melanomas = [s for s in train if s.label == 1]
+    benign = random.Random(seed).sample([s for s in train if s.label == 0], len(melanomas))
+    return melanomas + benign
 
 
 def main() -> None:
-    """Train on fitting patients, select a checkpoint and calibrate its rule.
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("config", type=Path, help="YAML hyperparameters, e.g. configs/siamese.yaml")
+    parser.add_argument("--run-name", help="output folder under data/runs (default: config name)")
+    args = parser.parse_args()
+    config = yaml.safe_load(args.config.read_text())
+    run_dir = DATA_DIR / "runs" / (args.run_name or args.config.stem)
+    run_dir.mkdir(parents=True)  # fails rather than overwrite an earlier run
 
-    Notes
-    -----
-    This entry point never scores final or development patients.
-    Existing run directories are refused to preserve previous artifacts.
-    """
+    set_seed(config["seed"])
+    device = select_device()
+    splits = load_splits(read_samples())
+    sampler = melanoma_sampler(splits["train"], config["melanoma_fraction"], config["seed"])
+    train_loader = image_loader(splits["train"], config, train=True, sampler=sampler)
+    selection_loader = image_loader(splits["selection"], config)
+    model = MelanomaModel(pretrained=config["pretrained"]).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), config["learning_rate"], weight_decay=config["weight_decay"])
+    # Linear warm-up for the first 10% of steps, then cosine decay
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, config["learning_rate"], total_steps=config["epochs"] * len(train_loader), pct_start=0.1
+    )
 
-    started = time.perf_counter()
-    args = parse_run_config()
-    set_seed(args.seed)
-    device = select_device(args.device)
-    run_directory = args.output_dir / args.run_name
-    data = build_datasets(args)
-    identity = protocol_identity(args.protocol_manifest)
-    preprocessing = model_preprocessing(
-        args.rotation_degrees,
-        args.color_jitter,
-        args.translation_fraction,
-        args.scale_jitter,
-    )
-    weights = ResNet18_Weights.IMAGENET1K_V1
-    config = {**effective_config(args), "initial_weights": str(weights)}
-    run_directory.mkdir(parents=True, exist_ok=False)
-    config_path = run_directory / "effective_config.json"
-    with config_path.open("w", encoding="utf-8") as stream:
-        json.dump(config, stream, indent=2)
-        stream.write("\n")
-    config_hash = file_sha256(config_path)
-    print(
-        f"Device: {device}; images: fit={len(data.fit)}, "
-        f"selection={len(data.selection)}, calibration={len(data.calibration)}; "
-        "final evaluation disabled during training",
-        flush=True,
-    )
-    selection_loader = DataLoader(data.selection, batch_size=args.batch_size)
-    calibration_loader = DataLoader(data.calibration, batch_size=args.batch_size)
-
-    reset_peak_accelerator_memory(device)
-    model = MelanomaModel(weights=weights).to(device)
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": model.classifier.parameters()},
-            {"params": model.encoder.parameters(), "lr": args.encoder_learning_rate},
-        ],
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs - args.head_warmup_epochs,
-        eta_min=args.min_learning_rate,
-    )
-    pairs = SiamesePairDataset(data.fit, args.pairs_per_epoch, args.seed)
-    train_loader = DataLoader(
-        pairs,
-        batch_size=args.batch_size,
-        shuffle=True,
-        generator=torch.Generator().manual_seed(args.seed),
-    )
-    contrastive_weight = args.contrastive_weight if args.model == "siamese" else 0.0
-    objective = {
-        "classification_loss": "cross_entropy",
-        "contrastive_weight": contrastive_weight,
-        "contrastive_margin": args.contrastive_margin,
-    }
-
-    best_average_precision = -1.0
-    best_epoch = 0
-    best_state: dict[str, torch.Tensor] = {}
     history: list[dict[str, float]] = []
-    training_seconds = 0.0
-    selection_seconds = 0.0
-    for epoch in range(args.epochs):
-        pairs.set_epoch(epoch)
-        train_encoder = epoch >= args.head_warmup_epochs
-        learning_rate = float(optimizer.param_groups[0]["lr"])
-        encoder_learning_rate = (
-            float(optimizer.param_groups[1]["lr"]) if train_encoder else 0.0
-        )
-        phase_started = synchronised_time(device)
-        losses = train_epoch(
-            model,
-            train_loader,
-            optimizer,
-            device,
-            contrastive_weight,
-            args.contrastive_margin,
-            train_encoder=train_encoder,
-        )
-        epoch_training_seconds = synchronised_time(device) - phase_started
-        training_seconds += epoch_training_seconds
-        phase_started = synchronised_time(device)
-        selection_scores, selection_labels = score_model(
-            model, selection_loader, device
-        )
-        epoch_selection_seconds = synchronised_time(device) - phase_started
-        selection_seconds += epoch_selection_seconds
-        average_precision = float(
-            average_precision_score(selection_labels, selection_scores)
-        )
-        selection_loss = float(
-            log_loss(selection_labels, selection_scores, labels=[0, 1])
-        )
-        class_losses = {
-            f"selection_{name}_loss": float(
-                log_loss(
-                    selection_labels[selection_labels == label],
-                    selection_scores[selection_labels == label],
-                    labels=[0, 1],
-                )
-            )
-            for label, name in enumerate(("benign", "melanoma"))
-        }
-        coverage = pairs.sampling_coverage()
-        selection_roc_auc = float(roc_auc_score(selection_labels, selection_scores))
-        history.append(
-            {
-                "epoch": float(epoch + 1),
-                **losses,
-                **class_losses,
-                **coverage,
-                "learning_rate": learning_rate,
-                "encoder_learning_rate": encoder_learning_rate,
-                "selection_loss": selection_loss,
-                "selection_roc_auc": selection_roc_auc,
-                "selection_average_precision": average_precision,
-                "training_seconds": epoch_training_seconds,
-                "selection_seconds": epoch_selection_seconds,
-            }
-        )
-        plot_training_history(history, run_directory / "training.svg")
-        stage = "fine-tuning" if train_encoder else "head warmup"
-        print(
-            f"Epoch {epoch + 1}/{args.epochs} ({stage}): "
-            f"head lr={learning_rate:.2e}, encoder lr={encoder_learning_rate:.2e}, "
-            f"loss={losses['train_loss']:.4f}, "
-            f"CE={losses['classification_loss']:.4f}, "
-            f"contrastive={losses['contrastive_loss']:.4f}, "
-            f"selection loss={selection_loss:.4f}, "
-            f"benign loss={class_losses['selection_benign_loss']:.4f}, "
-            f"melanoma loss={class_losses['selection_melanoma_loss']:.4f}, "
-            f"AP={average_precision:.4f}, AUROC={selection_roc_auc:.4f}; "
-            f"unique benign images={coverage['sampled_benign_images']:.0f}, "
-            f"melanoma images={coverage['sampled_melanoma_images']:.0f}, "
-            f"melanoma patients={coverage['sampled_melanoma_patients']:.0f}",
-            flush=True,
-        )
-        if average_precision > best_average_precision:
-            best_average_precision = average_precision
-            best_epoch = epoch + 1
+    best_auroc, peak_gpu = 0.0, 0.0
+    started = time.perf_counter()
+    for epoch in range(1, config["epochs"] + 1):
+        losses = train_epoch(model, train_loader, optimizer, scheduler, device, config)
+        peak_gpu = max(peak_gpu, accelerator_memory_gib(device))
+        margins, _, labels = score_images(model, selection_loader, device)
+        history.append({
+            "epoch": epoch,
+            **losses,
+            "selection_cross_entropy": float(log_loss(labels, 1 / (1 + np.exp(-margins)))),
+            "selection_auroc": float(roc_auc_score(labels, margins)),
+            "selection_average_precision": float(average_precision_score(labels, margins)),
+        })
+        print(", ".join(f"{key}={value:.4f}" for key, value in history[-1].items()), flush=True)
+        plot_training_history(history, run_dir / "training.svg")
+        # AUROC uses every selection image; AP over 41 melanomas is too noisy to pick epochs
+        if history[-1]["selection_auroc"] > best_auroc:
+            best_auroc, best_epoch = history[-1]["selection_auroc"], epoch
             best_state = copy.deepcopy(model.state_dict())
-        if train_encoder:
-            scheduler.step()
-
+    training_hours = (time.perf_counter() - started) / 3600
     model.load_state_dict(best_state)
-    phase_started = synchronised_time(device)
-    selection_scores, selection_labels = score_model(model, selection_loader, device)
-    selection_seconds += synchronised_time(device) - phase_started
-    phase_started = synchronised_time(device)
-    calibration_scores, calibration_labels = score_model(
-        model, calibration_loader, device
+
+    # Freeze every decision rule on calibration patients
+    gallery = reference_gallery(splits["train"], config["seed"])
+    _, gallery_embeddings, gallery_labels = score_images(model, image_loader(gallery, config), device)
+    margins, embeddings, labels = score_images(model, image_loader(splits["calibration"], config), device)
+    platt = fit_platt(margins, labels)
+    probabilities = melanoma_probability(margins, platt)
+    _, reference_scores = nearest_references(
+        embeddings, gallery_embeddings, torch.from_numpy(gallery_labels), config["neighbours"]
     )
-    decision_rule = select_triage_rule(
-        calibration_labels, calibration_scores, args.target_recall
-    )
-    calibration_seconds = synchronised_time(device) - phase_started
-    phase_started = synchronised_time(device)
-    profile = profile_model(model, selection_loader, device)
-    profiling_seconds = synchronised_time(device) - phase_started
-    fit_patient_ids = sorted(
-        {data.dataset.samples[index].patient_id for index in data.indices.fit}
-    )
-    timings = {
-        "training_seconds": training_seconds,
-        "selection_seconds": selection_seconds,
-        "calibration_seconds": calibration_seconds,
-        "profiling_seconds": profiling_seconds,
+    rule = {
+        "platt": platt,
+        "decision_threshold": specificity_threshold(labels, probabilities, config["target_specificity"]),
+        "review_threshold": recall_threshold(labels, probabilities, config["review_recall"]),
+        "reference_review_threshold": recall_threshold(labels, reference_scores.numpy(), config["review_recall"]),
     }
-    report: dict[str, object] = {
-        "model": args.model,
-        "device": str(device),
-        "seed": args.seed,
-        "run_name": args.run_name,
-        "score_kind": "melanoma_softmax_score",
-        "objective": objective,
-        "training_budget": {
-            "batch_size_pairs": args.batch_size,
-            "images_per_full_training_batch": 2 * args.batch_size,
-            "pairs_per_epoch": len(pairs),
-            "image_presentations_per_epoch": 2 * len(pairs),
-            "optimizer_steps_per_epoch": len(train_loader),
-            "total_image_presentations": 2 * len(pairs) * args.epochs,
-            "total_optimizer_steps": len(train_loader) * args.epochs,
-            "encoder_optimizer_steps": len(train_loader)
-            * (args.epochs - args.head_warmup_epochs),
+    torch.save({
+        "config": config,
+        "state_dict": {name: tensor.cpu() for name, tensor in model.state_dict().items()},
+        "rule": rule,
+        "gallery_names": [s.image_name for s in gallery],
+        "gallery_embeddings": gallery_embeddings,
+        "gallery_labels": torch.from_numpy(gallery_labels),
+    }, run_dir / "checkpoint.pt")
+
+    report = {
+        "best_epoch": best_epoch,
+        "rule": rule,
+        "calibration": {
+            "auroc": float(roc_auc_score(labels, probabilities)),
+            "average_precision": float(average_precision_score(labels, probabilities)),
+            "decision": threshold_metrics(labels, probabilities, rule["decision_threshold"]),
+            "review": threshold_metrics(labels, probabilities, rule["review_threshold"]),
         },
-        "protocol": identity,
-        "partitions": partition_summary(data.dataset, data.indices),
+        "profile": {
+            "parameters": sum(p.numel() for p in model.parameters()),
+            "training_hours": training_hours,
+            "peak_gpu_memory_gib": peak_gpu,
+            "peak_process_memory_gib": peak_process_memory_gib(),
+        },
         "history": history,
-        "history_metric_partition": "selection",
-        "best_epoch": best_epoch,
-        "selection_metric": "melanoma_average_precision",
-        "best_selection_average_precision": best_average_precision,
-        "decision_rule_partition": "calibration",
-        "decision_rule": decision_rule,
-        "selection": classification_metrics(
-            selection_labels, selection_scores, decision_rule["threshold"]
-        ),
-        "calibration": classification_metrics(
-            calibration_labels, calibration_scores, decision_rule["threshold"]
-        ),
-        "selection_at_0_5": classification_metrics(
-            selection_labels, selection_scores, 0.5
-        ),
-        "calibration_at_0_5": classification_metrics(
-            calibration_labels, calibration_scores, 0.5
-        ),
-        "profile": profile,
-        "timings": timings,
-        "effective_config_sha256": config_hash,
-        "final_evaluated": False,
     }
-    checkpoint = {
-        "model_name": args.model,
-        "state_dict": cpu_state_dict(model),
-        "preprocessing": preprocessing,
-        "protocol": identity,
-        "fit_patient_ids": fit_patient_ids,
-        "score_kind": "melanoma_softmax_score",
-        "objective": objective,
-        "decision_rule": decision_rule,
-        "decision_rule_partition": "calibration",
-        "best_epoch": best_epoch,
-        "effective_config_sha256": config_hash,
-    }
-    save_checkpoint(run_directory / "checkpoint.pt", checkpoint)
-    write_predictions(
-        run_directory / "selection_predictions.csv",
-        data.dataset,
-        data.selection,
-        selection_labels,
-        selection_scores,
-        decision_rule,
-    )
-    write_predictions(
-        run_directory / "calibration_predictions.csv",
-        data.dataset,
-        data.calibration,
-        calibration_labels,
-        calibration_scores,
-        decision_rule,
-    )
-    profile.update(memory_usage(device))
-    timings["total_seconds"] = time.perf_counter() - started
-    with (run_directory / "metrics.json").open("w", encoding="utf-8") as stream:
-        json.dump(report, stream, indent=2)
-        stream.write("\n")
-    print(json.dumps(report["calibration"], indent=2))
-    print(f"Saved development artifacts to {run_directory}")
+    (run_dir / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps({key: report[key] for key in ("best_epoch", "rule", "calibration")}, indent=2))
 
 
 if __name__ == "__main__":
