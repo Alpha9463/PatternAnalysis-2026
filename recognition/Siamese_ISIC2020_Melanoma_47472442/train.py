@@ -145,7 +145,8 @@ def main() -> None:
             "auroc": float(roc_auc_score(labels, probabilities)),
             "average_precision": float(average_precision_score(labels, probabilities)),
             "decision": threshold_metrics(labels, probabilities, rule["decision_threshold"]),
-            "review": threshold_metrics(labels, probabilities, rule["review_threshold"]),
+            "reference_review": threshold_metrics(labels, reference_scores.numpy(), rule["reference_review_threshold"]),
+            "classifier_review": threshold_metrics(labels, probabilities, rule["review_threshold"]),
         },
         "profile": {
             "parameters": sum(p.numel() for p in model.parameters()),

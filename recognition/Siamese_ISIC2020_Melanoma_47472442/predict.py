@@ -3,8 +3,10 @@
     python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
         data/runs/siamese/checkpoint.pt --partition calibration
 
-Triage uses the rules frozen on calibration patients: probability >= decision
-threshold -> "melanoma"; >= review threshold -> "review"; otherwise "benign".
+Triage uses the rules frozen on calibration patients: classifier probability >=
+decision threshold -> "melanoma"; otherwise reference score >= reference review
+threshold -> "review"; otherwise "benign". The classifier's own review threshold
+is still scored for comparison but swings far more between seeds.
 Outputs (predictions.csv, metrics.json, SVG figures) go to ``<run>/<partition>/``.
 """
 
@@ -72,7 +74,7 @@ def main() -> None:
     reference_scores = reference_scores.numpy()
     decisions = np.where(
         probabilities >= rule["decision_threshold"], "melanoma",
-        np.where(probabilities >= rule["review_threshold"], "review", "benign"),
+        np.where(reference_scores >= rule["reference_review_threshold"], "review", "benign"),
     )
 
     columns = ("image_name", "patient_id", "actual", "probability", "reference_score", "decision")
@@ -101,8 +103,12 @@ def main() -> None:
             "average_precision": float(average_precision_score(labels, reference_scores)),
         },
         "decision": threshold_metrics(labels, probabilities, rule["decision_threshold"]),
-        "review": threshold_metrics(labels, probabilities, rule["review_threshold"]),
         "reference_review": threshold_metrics(labels, reference_scores, rule["reference_review_threshold"]),
+        "classifier_review": threshold_metrics(labels, probabilities, rule["review_threshold"]),
+        "triage": {
+            "workload": float((decisions != "benign").mean()),
+            "melanoma_capture": float((decisions != "benign")[labels == 1].mean()),
+        },
         "error_detection_auroc": {
             "confidence": float(roc_auc_score(errors, -np.abs(log_odds - decision_log_odds))),
             "reference_disagreement": float(roc_auc_score(errors, np.abs(reference_scores - flagged))),
@@ -134,7 +140,7 @@ def main() -> None:
     plot_curves(labels, probabilities, reference_scores, rule, out_dir / "curves.svg", title)
     plot_embeddings(checkpoint["gallery_embeddings"].numpy(), checkpoint["gallery_labels"].numpy(), embeddings.numpy(), labels, out_dir / "embeddings.svg", args.partition)
     plot_cases(cases, out_dir / "cases.svg")
-    print(json.dumps({key: metrics[key] for key in ("classifier", "reference", "decision", "review", "reference_review")}, indent=2), file=sys.stderr)
+    print(json.dumps({key: metrics[key] for key in ("classifier", "reference", "decision", "reference_review", "triage")}, indent=2), file=sys.stderr)
 
 
 if __name__ == "__main__":

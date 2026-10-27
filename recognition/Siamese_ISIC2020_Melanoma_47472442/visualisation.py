@@ -83,8 +83,8 @@ def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores:
         precision, recall, _ = precision_recall_curve(labels, scores)
         roc.plot(fpr, tpr, color=colour, label=f"{name} AUROC = {roc_auc_score(labels, scores):.3f}")
         pr.plot(recall, precision, color=colour, label=f"{name} AP = {average_precision_score(labels, scores):.3f}")
-    for key, marker in (("decision_threshold", "o"), ("review_threshold", "s")):
-        flagged = probabilities >= rule[key]
+    for scores, key, marker in ((probabilities, "decision_threshold", "o"), (reference_scores, "reference_review_threshold", "s")):
+        flagged = scores >= rule[key]
         recall = flagged[labels == 1].mean()
         roc.scatter(flagged[labels == 0].mean(), recall, marker=marker, color="black", zorder=3, label=key.replace("_", " "))
         pr.scatter(recall, labels[flagged].mean(), marker=marker, color="black", zorder=3)
