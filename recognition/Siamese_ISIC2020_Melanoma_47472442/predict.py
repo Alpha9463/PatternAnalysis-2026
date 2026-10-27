@@ -120,10 +120,11 @@ def main() -> None:
     # Failure cases: the two lowest-scored melanomas and three highest-scored benign images
     missed = [i for i in np.argsort(probabilities) if labels[i] == 1][:2]
     false_alarms = [i for i in np.argsort(-probabilities) if labels[i] == 0][:3]
-    gallery = {s.image_name: s for s in read_samples() if s.image_name in set(checkpoint["gallery_names"])}
+    all_samples = {s.image_name: s for s in read_samples()}
+    gallery = [all_samples[name] for name in checkpoint["gallery_names"]]
     cases = []
     for i in missed + false_alarms:
-        reference = gallery[checkpoint["gallery_names"][neighbours[i, 0]]]
+        reference = gallery[neighbours[i, 0]]
         cases.append({
             "image_name": samples[i].image_name, "path": samples[i].path, "actual": ("benign", "melanoma")[labels[i]],
             "probability": probabilities[i], "decision": decisions[i], "reference_score": reference_scores[i],
