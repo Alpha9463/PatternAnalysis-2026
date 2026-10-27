@@ -70,8 +70,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("config", type=Path, help="YAML hyperparameters, e.g. configs/siamese.yaml")
     parser.add_argument("--run-name", help="output folder under data/runs (default: config name)")
+    parser.add_argument("--seed", type=int, help="override the config seed (patient splits stay fixed)")
     args = parser.parse_args()
     config = yaml.safe_load(args.config.read_text())
+    if args.seed is not None:
+        config["seed"] = args.seed
     run_dir = DATA_DIR / "runs" / (args.run_name or args.config.stem)
     run_dir.mkdir(parents=True)  # fails rather than overwrite an earlier run
 
