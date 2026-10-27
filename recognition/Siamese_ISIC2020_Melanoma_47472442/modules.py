@@ -51,8 +51,12 @@ def nearest_references(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Siamese comparison with labelled training references.
 
-    Returns each query's nearest reference indices ``[queries, neighbours]`` and
-    its reference score: the fraction of those neighbours that are melanoma.
+    Returns each query's nearest reference index ``[queries]`` and its reference
+    score ``d_benign / (d_benign + d_melanoma)``, where each ``d`` is the mean distance
+    to the ``neighbours`` closest references of that class: 0.5 is equidistant and
+    higher is more melanoma-like. Unlike a neighbour vote it is continuous, so a
+    recall threshold never collapses onto a tie.
     """
-    indices = torch.cdist(queries, references).topk(neighbours, largest=False).indices
-    return indices, reference_labels[indices].float().mean(dim=1)
+    distances = torch.cdist(queries, references)
+    benign, melanoma = (distances[:, reference_labels == label].topk(neighbours, largest=False).values.mean(dim=1) for label in (0, 1))
+    return distances.argmin(dim=1), benign / (benign + melanoma)

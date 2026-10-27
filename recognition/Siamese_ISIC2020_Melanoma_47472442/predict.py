@@ -66,7 +66,7 @@ def main() -> None:
     margins, embeddings, labels = score_images(model, image_loader(samples, config), device)
     images_per_second = len(samples) / (time.perf_counter() - started)
     probabilities = melanoma_probability(margins, rule["platt"])
-    neighbours, reference_scores = nearest_references(
+    nearest, reference_scores = nearest_references(
         embeddings, checkpoint["gallery_embeddings"], checkpoint["gallery_labels"], config["neighbours"]
     )
     reference_scores = reference_scores.numpy()
@@ -82,7 +82,7 @@ def main() -> None:
             csv.writer(output).writerows([columns, *rows])
 
     # Does uncertainty find wrong decisions? Confidence = distance from the threshold in log-odds;
-    # reference disagreement = share of neighbours whose label opposes the decision.
+    # reference disagreement = how far the reference score leans away from the decision.
     flagged = probabilities >= rule["decision_threshold"]
     errors = flagged != labels
     log_odds = rule["platt"][0] * margins + rule["platt"][1]
@@ -124,7 +124,7 @@ def main() -> None:
     gallery = [all_samples[name] for name in checkpoint["gallery_names"]]
     cases = []
     for i in missed + false_alarms:
-        reference = gallery[neighbours[i, 0]]
+        reference = gallery[nearest[i]]
         cases.append({
             "image_name": samples[i].image_name, "path": samples[i].path, "actual": ("benign", "melanoma")[labels[i]],
             "probability": probabilities[i], "decision": decisions[i], "reference_score": reference_scores[i],
