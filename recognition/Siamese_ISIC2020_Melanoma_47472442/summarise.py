@@ -152,7 +152,15 @@ def redraw_figures(runs: Path, output: Path) -> None:
         plot_curves(p["label"], p["probability"], p["reference_score"], training[model]["rule"], output / f"final_curves_{model}.svg", f"{model.capitalize()} · seed 42 · final · rounded saved scores")
     baseline = predictions["baseline"]
     order = np.argsort(baseline["probability"])
-    chosen = [i for i in order if baseline["label"][i] == 1][:2] + [i for i in order[::-1] if baseline["label"][i] == 0][:3]
+    missed_by_both = [
+        i for i in order
+        if baseline["label"][i] == 1 and all(p["decision"][i] == "benign" for p in predictions.values())
+    ]
+    chosen = (
+        [i for i in order if baseline["label"][i] == 1][:2]
+        + [i for i in order[::-1] if baseline["label"][i] == 0][:2]
+        + missed_by_both[:1]
+    )
     samples = {sample.image_name: sample for sample in read_samples()}
     config = yaml.safe_load((Path(__file__).parent / "configs/baseline.yaml").read_text())
     for number, indices in enumerate((chosen[:2], chosen[2:4], chosen[4:]), 1):

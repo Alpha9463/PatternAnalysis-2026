@@ -35,8 +35,9 @@ def contrastive_loss(embeddings: torch.Tensor, labels: torch.Tensor, margin: flo
     """Contrastive loss over every image pair in the batch (Siamese pairs share all weights).
 
     Same-class pairs are pulled together (squared distance); different-class pairs
-    are pushed until they are at least ``margin`` apart. Positive and negative pair
-    means are added so the many benign-benign pairs do not swamp melanoma pairs.
+    are pushed until they are at least ``margin`` apart. The same-class and
+    different-class terms are averaged separately to balance their contributions.
+    Benign pairs still dominate within the same-class term.
     """
     squared = (2 - 2 * embeddings @ embeddings.T).clamp_min(1e-12)  # unit vectors: |a-b|^2 = 2 - 2a.b
     same = labels[:, None] == labels[None, :]

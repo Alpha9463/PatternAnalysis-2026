@@ -38,53 +38,56 @@ def _thumbnail(path: Path) -> Image.Image:
 
 
 def plot_architecture(path: Path) -> None:
-    """Draw encoder stages and the training and prediction branches.
+    """Draw the forward pass, combined loss and feedback to trainable weights.
 
     Parameters
     ----------
     path : pathlib.Path
         Destination SVG file.
     """
-    figure, (encoder, heads) = plt.subplots(2, 1, figsize=(12, 7.4), gridspec_kw={"height_ratios": (1, 2.4)})
-    for axis in (encoder, heads):
-        axis.set(xlim=(-0.02, 1.02), ylim=(-0.10, 1.10))
-        axis.axis("off")
-    encoder.set_title("Shared ResNet-18 encoder — the same weights process every image", fontsize=14, pad=14)
-    style = {"boxstyle": "round,pad=0.55", "fc": "#edf3f8", "ec": "#2878b5"}
-    stages = (
-        "RGB image\n3 × 384 × 384",
-        "7×7 conv, s2\nBN + ReLU\n3×3 pool, s2\n64 × 96 × 96",
-        "Stage 1\n2 basic blocks\n64 × 96 × 96",
-        "Stage 2\n2 basic blocks\n128 × 48 × 48",
-        "Stage 3\n2 basic blocks\n256 × 24 × 24",
-        "Stage 4\n2 basic blocks\n512 × 12 × 12",
-        "Global avg pool\nFlatten\n512 features",
-    )
-    positions = np.linspace(0.06, 0.94, len(stages))
-    boxes = [encoder.text(x, 0.5, label, ha="center", va="center", fontsize=12.5, bbox=style) for x, label in zip(positions, stages)]
-    for index in range(len(boxes) - 1):
-        encoder.annotate("", xy=(positions[index + 1], 0.5), xytext=(positions[index], 0.5), arrowprops={"arrowstyle": "->", "patchA": boxes[index].get_bbox_patch(), "patchB": boxes[index + 1].get_bbox_patch(), "shrinkA": 4, "shrinkB": 4})
-
-    heads.set_title("Classifier and embedding branches", fontsize=14, pad=12)
-    heads.set_ylim(-0.24, 1.20)
+    figure, axis = plt.subplots(figsize=(12.5, 4.5))
+    axis.set(xlim=(-0.04, 1.10), ylim=(-0.10, 1.80))
+    axis.axis("off")
     nodes = {
-        "features": (0.08, 0.55, "Pooled encoder\n512 features", False),
-        "logits": (0.34, 0.82, "Linear 512 → 2\nClass logits", False),
-        "embedding": (0.34, 0.28, "L2 normalisation\n512-d embedding", False),
-        "classification": (0.62, 1.02, "Training only\nCross-entropy loss", True),
-        "probability": (0.62, 0.65, "Platt scaling\nMelanoma probability p", False),
-        "contrastive": (0.62, 0.28, "Training only\n496 within-batch pairs\nContrastive loss", True),
-        "references": (0.62, -0.09, "838 references, same encoder\n15 nearest per class\nReference score r", False),
-        "review": (0.92, 0.55, "Fixed review policy\nMelanoma flag /\nreview / benign", False),
+        "images": (0.06, 0.45, "RGB batch\n32 images\n3 × 384 × 384 each"),
+        "encoder": (0.27, 0.45, "Shared ResNet-18\nGlobal average pool\n512 features / image"),
+        "logits": (0.50, 0.75, "Linear 512 → 2\nClass logits"),
+        "embedding": (0.50, 0.15, "L2 normalisation\n512-d embedding"),
+        "classification": (0.72, 0.75, "Both models\nCross-entropy (CE)"),
+        "contrastive": (0.72, 0.15, "Siamese training only\nContrastive loss\n496 pairs / batch"),
+        "total": (0.95, 0.45, "Total training loss\nCE + λ × contrastive\nλ = 0: baseline\nλ = 0.5: Siamese"),
+    }
+    training_colours = {
+        "classification": ("#fff3df", "#a56b1f"),
+        "contrastive": ("#f1e7fb", "#7d4db2"),
+        "total": ("#e8f4ed", "#2b7050"),
     }
     labels = {}
-    for name, (x, y, label, training) in nodes.items():
-        box = {**style, "fc": "#fff3df", "ec": "#a56b1f"} if training else style
-        labels[name] = heads.text(x, y, label, ha="center", va="center", fontsize=13, bbox=box)
-    for start, end in (("features", "logits"), ("features", "embedding"), ("logits", "classification"), ("logits", "probability"), ("embedding", "contrastive"), ("embedding", "references"), ("probability", "review"), ("references", "review")):
-        connection = "angle,angleA=0,angleB=-90,rad=0" if start == "references" else "arc3"
-        heads.annotate("", xy=nodes[end][:2], xytext=nodes[start][:2], arrowprops={"arrowstyle": "->", "patchA": labels[start].get_bbox_patch(), "patchB": labels[end].get_bbox_patch(), "connectionstyle": connection, "shrinkA": 5, "shrinkB": 5})
-    heads.text(0.5, -0.34, "Training: 32 images per batch; loss = cross-entropy + λ × contrastive.  λ = 0 (baseline) or 0.5 (Siamese).", ha="center", va="top", fontsize=12)
+    for name, (x, y, label) in nodes.items():
+        fill, edge = training_colours.get(name, ("#edf3f8", "#2878b5"))
+        box = {"boxstyle": "round,pad=0.5", "fc": fill, "ec": edge}
+        labels[name] = axis.text(x, y, label, ha="center", va="center", fontsize=12.5, bbox=box)
+    for start, end in (
+        ("images", "encoder"), ("encoder", "logits"), ("encoder", "embedding"),
+        ("logits", "classification"), ("embedding", "contrastive"),
+        ("classification", "total"), ("contrastive", "total"),
+    ):
+        colour = training_colours.get(start, training_colours.get(end, ("", "#34414d")))[1]
+        axis.annotate("", xy=nodes[end][:2], xytext=nodes[start][:2], arrowprops={
+            "arrowstyle": "->", "color": colour,
+            "patchA": labels[start].get_bbox_patch(), "patchB": labels[end].get_bbox_patch(),
+            "shrinkA": 5, "shrinkB": 5,
+        })
+    feedback = {"color": "#2b7050", "linestyle": "--", "linewidth": 1.2}
+    axis.annotate("", xy=(0.95, 1.25), xytext=nodes["total"][:2], arrowprops={
+        **feedback, "arrowstyle": "-", "patchA": labels["total"].get_bbox_patch(), "shrinkA": 5, "shrinkB": 0,
+    })
+    axis.plot([0.95, 0.27], [1.25, 1.25], **feedback)
+    for name in ("encoder", "logits"):
+        axis.annotate("", xy=nodes[name][:2], xytext=(nodes[name][0], 1.25), arrowprops={
+            **feedback, "arrowstyle": "->", "patchB": labels[name].get_bbox_patch(), "shrinkA": 0, "shrinkB": 5,
+        })
+    axis.text(0.61, 1.53, "Backpropagation + AdamW weight updates\nEncoder: total loss · classifier: cross-entropy only", ha="center", va="center", fontsize=13, color="#2b7050")
     _save(figure, path)
 
 

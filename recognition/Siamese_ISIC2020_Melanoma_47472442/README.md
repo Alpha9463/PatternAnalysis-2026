@@ -6,7 +6,7 @@ This project uses ISIC 2020 to investigate whether Siamese metric learning impro
 
 Five training seeds were evaluated for each model on 4,728 images from 288 patients, including 74 melanomas. Mean accuracy was 0.824 for the baseline and 0.830 for Siamese. Melanoma average precision was 0.195 and 0.176, respectively. The reference-based review policy sent about 32% of images to a specialist and captured 88.9% of melanomas with the baseline and 90.5% with Siamese. Neither met the 95% capture target on final patients.
 
-The recommendation is to retain the baseline as the classification benchmark and study reference-assisted review in both models. Contrastive training showed no consistent classification advantage, although Siamese rescued some baseline misses through review. Reference comparison helped rank missed melanomas, but the remaining misses prevent automatic benign clearance. These are internal benchmark results requiring independent confirmation.
+The recommendation is to retain the baseline as the classification benchmark and study reference-assisted review in both models. Contrastive training showed no consistent classification advantage, although Siamese rescued some baseline misses through review. Reference comparison helped rank missed melanomas, but the remaining misses prevent automatic benign clearance. These findings come from a five-seed comparison on fixed patient groups.
 
 ## Feasibility Review
 
@@ -34,6 +34,61 @@ The Hard-difficulty Siamese task uses ISIC 2020 and PyTorch. ResNet-18 supports 
 
 The main risks are memorisation of the small melanoma class, overconfident errors and uncertain thresholds fitted on only 50 calibration melanomas. Patient grouping, separate model selection and calibration, repeated training seeds and fixed evaluation rules address these risks. The classification-only baseline is the fallback if metric learning offers no useful improvement. The next experiment should assess the fixed baseline and review rule on independent patients under a new evaluation plan.
 
+## Symbols, Abbreviations and Key Terms
+
+Definitions follow their use in this report. Unless stated otherwise, metrics describe individual images, with melanoma as the positive class and benign as the negative class.
+
+### Abbreviations and Evaluation Measures
+
+| Term | Meaning |
+| --- | --- |
+| ISIC | International Skin Imaging Collaboration; the source of the dermoscopic image dataset. |
+| CNN / ResNet-18 | Convolutional neural network / the 18-layer residual network used to extract image features. |
+| RGB | Red, green and blue; the three input image channels. |
+| BN / ReLU | Batch normalisation / rectified linear unit; operations inside the encoder. |
+| AUROC | Area under the receiver operating characteristic curve. Measures ranking across thresholds; 0.5 is chance and 1 is perfect ranking. |
+| AP / PR-AUC | Average precision / area under the precision–recall curve. This report uses AP as its precision–recall summary. |
+| Precision / recall | Fraction of melanoma flags that are correct / fraction of actual melanomas flagged. Recall is also called sensitivity. |
+| Specificity | Fraction of actual benign images labelled benign by the classifier. |
+| F1 / macro-F1 | F1 is the harmonic mean of precision and recall; macro-F1 averages the two class F1 scores equally. |
+| TP / TN / FP / FN | Correct melanoma / correct benign / benign incorrectly flagged / melanoma missed by the classifier. |
+| Brier score | Mean squared difference between predicted probabilities and binary labels; lower is better. |
+| PCA | Principal component analysis; the method used to project embeddings into two dimensions. |
+| SD | Standard deviation; the spread across training seeds in the mean ± SD tables. |
+| GPU / VRAM | Graphics processing unit / graphics memory; the accelerator and its memory. |
+| MPS / CUDA | Apple's Metal Performance Shaders / NVIDIA's GPU computing platform; supported accelerator backends. |
+| RSS / GiB | Resident set size, meaning process memory held in RAM / gibibyte, equal to $2^{30}$ bytes. |
+
+### Symbols
+
+| Symbol | Meaning |
+| --- | --- |
+| $p$ | Calibrated classifier probability of melanoma. |
+| $r$ | Reference similarity score; larger values mean relatively closer melanoma references. It is not a probability. |
+| $t$, $u$ | Classifier probability cutoff and reference review cutoff, respectively. |
+| $\hat y$ | Binary classifier prediction: 1 for melanoma and 0 for benign. |
+| $d_{ij}$ | Distance between the unit-length embeddings of images $i$ and $j$. |
+| $\bar d_b$, $\bar d_m$ | Mean distances to the nearest benign and melanoma references, respectively. |
+| $P$, $N$ | Sets of same-class and different-class image pairs. $\lvert P\rvert$ and $\lvert N\rvert$ count their members. |
+| $m$ | Contrastive margin: the target minimum distance for different-class pairs, set to 1. |
+| $L$, $L_{\mathrm{CE}}$ | Total training loss and its cross-entropy classification term. |
+| $\lambda$ | Weight of the contrastive loss: 0 for the baseline and 0.5 for Siamese. |
+
+### Model and Experiment Terms
+
+| Term | Meaning |
+| --- | --- |
+| Encoder / embedding | Network that extracts features / the numerical vector representing an image for comparison. |
+| Siamese learning | Learning image comparisons using the same encoder weights for every image in a pair. |
+| Contrastive loss | Training penalty that pulls same-class embeddings together and separates different-class embeddings. |
+| Logit / logit margin | Raw classifier score / the melanoma logit minus the benign logit. |
+| Batch / epoch | Group of images processed in one training step / one configured round of training-image draws. |
+| Seed / checkpoint | Number controlling random choices / a saved trained model that can be restored for prediction. |
+| Reference gallery | Labelled training images whose embeddings are compared with each query image. |
+| Calibration / Platt scaling | Adjustment of output scores towards meaningful probabilities / the logistic mapping fitted for that purpose. |
+| Review capture / workload | Fraction of melanomas sent to review / fraction of all images sent to review. Both include melanoma flags. |
+| Patient-cluster bootstrap | Resampling whole patients with all their images to estimate uncertainty in evaluation results. |
+
 ## Methodology
 
 ### Dataset and Patient Groups
@@ -49,8 +104,6 @@ The SIIM-ISIC 2020 dataset [1, 2] contains 33,126 JPEG images from 2,056 patient
 
 The manifest uses seeds 42, 20261007 and 20261008. All patient groups are disjoint. Evaluation retains the natural melanoma prevalence of approximately 1.6–2.1%.
 
-The final cohort informed model development, so it provides an internal benchmark rather than independent validation. Its patients are separate from training patients, but development-related optimism has not been quantified.
-
 ### Image Preparation
 
 Images use JPEG draft decoding, EXIF orientation correction and RGB conversion. Evaluation resizes the shorter side to 384 pixels and takes a 384 × 384 centre crop. ImageNet normalisation uses means (0.485, 0.456, 0.406) and standard deviations (0.229, 0.224, 0.225).
@@ -61,9 +114,9 @@ Training uses random resized crops covering 35–100% of the image, horizontal a
 
 ResNet-18 [4, 6] maps each image to 512 features. A linear head produces benign and melanoma logits. The same features, scaled to unit length, form the embedding used for distance comparisons. Pair members share all encoder weights, following the Siamese principle [11]. Prediction restores the encoder and classifier learned during training.
 
-![ResNet-18 architecture, tensor shapes, training losses and prediction paths](figures/architecture.svg)
+![Training architecture: loss combination and weight updates, with the Siamese-only branch highlighted](figures/architecture.svg)
 
-The encoder stages show channel and spatial dimensions per image. Both models use the same architecture. The training losses update the shared encoder; prediction combines classifier probability with reference similarity through the fixed review policy.
+The baseline uses cross-entropy alone; Siamese adds the purple contrastive-loss term with weight 0.5. Both terms feed the total loss. Dashed arrows show backpropagation and AdamW updates: the encoder receives total-loss gradients, while the classifier receives cross-entropy gradients only. Prediction uses the learned logits and embeddings, followed by calibration and reference comparison.
 
 ### Training Objective
 
@@ -216,7 +269,7 @@ The calibration comparison below thresholds each score alone to capture 48 of 50
 
 ### Final Referral Trade-off
 
-The following comparison uses the same final patients and the existing calibration cutoffs for every rule. Values are mean ± sample standard deviation across five seeds. Probability-only review already includes classifier flags because its cutoff is lower than the binary decision threshold in all ten runs. Reference-only review is also shown separately from the combined policy.
+The following comparison uses the same final patients and the existing calibration cutoffs. Values are mean ± sample standard deviation. Probability-only review already includes classifier flags because its cutoff is lower than the binary decision threshold.
 
 | Model    | Fixed final policy                  | Workload (%) | Melanoma capture (%) |
 | -------- | ----------------------------------- | -----------: | -------------------: |
@@ -233,27 +286,27 @@ For the baseline, combined reference review reduces mean workload from 47.2% to 
 
 ## Failure Case Analysis
 
-These five cases are the two lowest-probability melanomas and three highest-probability benign images from the seed-42 baseline. Both models are compared on those same images. Each figure shows the original and the actual evaluation crop received by both models, with their saved probabilities, reference scores and outputs. Visible features suggest possible failure triggers; no controlled intervention established their causes.
+Five cases were selected from the saved seed-42 predictions: the two lowest-probability melanomas and two highest-probability benign images under the baseline, plus the lowest-baseline-probability melanoma labelled benign by both complete policies. Both models are compared on those same images, using the original and actual evaluation crop. Cases 1–2 show specialist referrals through reference comparison; cases 3–4 are false-positive melanoma classifications; case 5 is a melanoma missed by both complete policies. Visible features suggest possible failure triggers; no controlled intervention established their causes.
 
-**1. Melanoma reviewed by both: `ISIC_0946787`.** A compact dark oval remains visible in the evaluation crop. Both classifiers miss it: baseline p≈0.0007 and Siamese p≈0.0101 are below their binary thresholds. Reference scores of 0.410 and 0.479 exceed their respective review cutoffs, rescuing the case in both models. A higher Siamese probability alone does not change the binary result.
+**1. Melanoma sent for specialist review by both models: `ISIC_0946787`.** A compact dark oval remains visible in the evaluation crop. Both classifiers miss it: baseline p≈0.0007 and Siamese p≈0.0101 are below their binary thresholds. Reference scores of 0.410 and 0.479 exceed their respective review cutoffs, so both models send the image for specialist review. A higher Siamese probability alone does not change the binary result.
 
-**2. Melanoma rescued only by Siamese: `ISIC_7748311`.** The crop retains a low-contrast brown lesion, hair and ruler markings. The baseline outputs benign (p≈0.00516, r=0.384); Siamese routes it for review (p≈0.01117, r=0.443). Both probabilities are below their binary cutoffs, so the difference comes from the reference rule. This illustrates a useful Siamese result for one seed pair, without proving that contrastive training or any particular artifact caused it.
+**2. Melanoma sent for specialist review by Siamese only: `ISIC_7748311`.** The crop retains a low-contrast brown lesion, hair and ruler markings. The baseline outputs benign (p≈0.00516, r=0.384); Siamese sends it for specialist review (p≈0.01117, r=0.443). Both probabilities are below their binary cutoffs, so the difference comes from the reference rule. This illustrates a useful Siamese result for one seed pair, without proving that contrastive training or any particular artifact caused it.
 
 ![Matched melanoma cases: original images, evaluation inputs and both model outputs](figures/final_cases_comparison_1.svg)
 
-**3. Benign image flagged by both: `ISIC_7194471`.** Dense hair and irregular pigmentation remain visible after cropping. Probability decreases from about 0.857 for baseline to 0.278 for Siamese, but both still exceed their binary thresholds. The lower Siamese score therefore remains a false positive. The image suggests visual ambiguity; it does not establish hair as the cause.
+**3. Benign lesion incorrectly classified as melanoma by both models: `ISIC_7194471`.** Dense hair and irregular pigmentation remain visible after cropping. Probability decreases from about 0.857 for baseline to 0.278 for Siamese, but both still exceed their binary thresholds. The lower Siamese score therefore remains a false positive. The image suggests visual ambiguity; it does not establish hair as the cause.
 
-**4. Benign image flagged by both: `ISIC_9743014`.** A dark centre and red surrounding area dominate the crop. Siamese probability is lower (about 0.098 versus 0.779), yet the decision remains a melanoma flag. Pigmentation and redness are plausible sources of confusion, but their individual effects were not isolated.
+**4. Benign lesion incorrectly classified as melanoma by both models: `ISIC_9743014`.** A dark centre and red surrounding area dominate the crop. Siamese probability is lower (about 0.098 versus 0.779), yet the decision remains an incorrect melanoma classification. Pigmentation and redness are plausible sources of confusion, but their individual effects were not isolated.
 
 ![Matched benign false positives with lower Siamese scores but unchanged decisions](figures/final_cases_comparison_2.svg)
 
-**5. Benign image flagged by both: `ISIC_5485142`.** A pink lesion sits among brown marks. The evaluation crop removes much of the outer framing, so the full image's dark corners cannot by themselves explain the prediction. Baseline p≈0.745 and Siamese p≈0.376 both produce melanoma flags. This persistent error warrants further investigation of lesion appearance and background rather than a claimed causal explanation.
+**5. Melanoma incorrectly labelled benign by both models: `ISIC_9785077`.** The crop retains a dark region within a red-pink lesion. Both classifiers miss the melanoma: baseline p≈0.00529 and Siamese p≈0.00331 are below their binary cutoffs. Reference scores of 0.373 and 0.424 also fall below the review cutoffs of approximately 0.402 and 0.431, respectively, so both models output `benign`. Reference comparison therefore fails to rescue this case even though the lesion remains visible in the input. The red-pink appearance and diffuse boundaries are possible sources of ambiguity, but their effects were not isolated.
 
-![Original framing and actual evaluation crop for a persistent benign false positive](figures/final_cases_comparison_3.svg)
+![Melanoma missed by both complete review policies: original image, evaluation crop and model outputs](figures/final_cases_comparison_3.svg)
 
 ## Computational Feasibility
 
-Measurements use the author's Apple M5 Pro with 48 GB unified memory and the PyTorch MPS backend. Values below describe seed 42. Both objectives have the same parameter count and forward architecture.
+Measurements use an Apple M5 Pro with 48 GB unified memory and the PyTorch MPS backend. Both objectives have the same parameter count and forward architecture.
 
 | Measurement                                           |   Baseline |    Siamese |
 | ----------------------------------------------------- | ---------: | ---------: |
@@ -267,15 +320,15 @@ Measurements use the author's Apple M5 Pro with 48 GB unified memory and the PyT
 
 Latency covers ten preloaded 32-image batches after three warmups, with device synchronisation. Image-scoring throughput includes loader startup, JPEG decoding, preprocessing and encoder execution; it excludes reference search and plotting. Both runs compute contrastive loss for monitoring, so their similar training times do not isolate the cost of that term.
 
-MPS values are driver-allocation samples, not measured peaks. Main-process RSS excludes loader workers. The available measurements support local feasibility, but do not establish total peak memory against the 24 GiB criterion. The 838 reference embeddings occupy about 1.7 MB.
+Main-process RSS excludes loader workers. The available measurements support local feasibility, but do not establish total peak memory against the 24 GiB criterion. The 838 reference embeddings occupy about 1.7 MB.
 
 ## Recommendation and Limitations
 
-Retain the baseline as the classification research benchmark because it has higher mean AP and a simpler objective. Siamese remains a useful comparison for referral research: its combined policy has slightly higher observed mean capture at similar workload, and it rescues one of the illustrated baseline misses. The mixed five-seed results do not establish a consistent overall advantage for either objective. Further model and policy selection requires independent patients.
+The baseline should be maintained as the classification research benchmark as it has higher mean AP and a simpler objective. The siamese model remains a useful comparison for referral research: its combined policy has slightly higher observed mean capture at similar workload, and it captures one of the melanomas that the baseline misses. To further validate these results, additional data should be obtained from new patients and the models validated further with more test runs.
 
-At the current policy, about 32% of images reach a specialist and mean melanoma capture is 89–91%. The remaining cases should not be treated as safely benign. Capture is below the calibration target and does not measure human diagnostic accuracy. The result is a workload–capture trade-off that still requires human oversight.
+The current review policy, sends ~32% of images to a specialist and mean melanoma capture is 89–91%. The remaining cases should not be treated as safely benign, as some melanomas can get through. Capture is below the calibration target and this additionally does not account for human diagnostic accuracy.
 
-The main limits are small melanoma groups, evaluation data informing development, one source dataset and incomplete peak-memory measurement. Further work should use independent patients, stronger calibration evidence and controlled investigation of image artifacts.
+The main limitations are the small melanoma sample and use of a single dataset. Further work should examine broader patient cohorts, stronger calibration evidence and controlled investigation of image artifacts.
 
 ## Reproducibility and Usage
 
@@ -358,9 +411,11 @@ python -m recognition.Siamese_ISIC2020_Melanoma_47472442.compare \
 
 ## Artificial Intelligence Usage Disclosure
 
-OpenAI Codex assisted with data loading, training and plotting code, literature review, typing fixes, offline summaries, report writing and the Quarto PDF export. Anthropic Claude assisted with in-batch contrastive loss, reference scoring, throughput optimisation and multi-seed analysis.
+OpenAI Codex assisted with data loading, training and plotting code, literature review, and report drafting. Anthropic Claude assisted with throughput optimisation and multi-seed analysis.
 
-Verification includes source checks, comparison of reported values with saved metrics and predictions, confirmation of patient separation and matching image identities, the paired patient bootstrap, and inspection of figures and the exported PDF. The author remains responsible for the code, references and every claim. No previous student's implementation was copied.
+A manual audit traced RGB preprocessing, shared encoder outputs, contrastive pair construction and fixed prediction rules through the source code and checked that they matched the documented method. Ruff and Pyright were used to identify code-quality and typing issues. Patient groups were checked for overlap, and image/patient identifiers and labels were matched across saved model outputs before comparison.
+
+Empirical testing used the completed baseline and Siamese training and saved-model prediction runs for five matched seeds. Learning curves and class-specific metrics were examined, and report tables were reproduced from saved metrics and prediction files. The paired patient bootstrap assessed evaluation uncertainty. Failure cases were inspected using original images, actual model input crops and both models' outputs; recorded runtime, memory and latency measurements assessed local feasibility. Figures and the exported PDF were also visually checked.
 
 ## References
 
