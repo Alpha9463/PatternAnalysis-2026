@@ -1,6 +1,0 @@
-torch
-numpy
-pillow
-scikit-learn
-pyyaml
-matplotlib

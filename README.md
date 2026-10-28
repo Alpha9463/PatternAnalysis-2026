@@ -1,13 +1,20 @@
 # Pattern Analysis
+Pattern Analysis of various datasets by COMP3710 students in 2025 at the University of Queensland.
 
-Pattern-recognition coursework repository for COMP3710 at The University of
-Queensland.
+We create pattern recognition and image processing library for Tensorflow (TF), PyTorch or JAX.
 
-## ISIC 2020 melanoma project
+This library is created and maintained by The University of Queensland [COMP3710](https://my.uq.edu.au/programs-courses/course.html?course_code=comp3710) students.
 
-The active assessment implementation is
-[recognition/Siamese_ISIC2020_Melanoma_47472442](recognition/Siamese_ISIC2020_Melanoma_47472442/README.md).
-It contains the required `modules.py`, `dataset.py`, `train.py`, `predict.py`,
-and project report README. Dataset files, split manifests, model checkpoints,
-metrics, predictions, and generated run figures stay under the ignored `data/`
-folder.
+The library includes the following implemented in Tensorflow:
+* fractals 
+* recognition problems
+
+In the recognition folder, you will find many recognition problems solved including:
+* segmentation
+* classification
+* graph neural networks
+* StyleGAN
+* Stable diffusion
+* transformers
+etc.
+
