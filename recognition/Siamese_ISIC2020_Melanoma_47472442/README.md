@@ -294,7 +294,7 @@ Five cases were selected from the saved seed-42 predictions: the two lowest-prob
 
 ![Matched melanoma cases: original images, evaluation inputs and both model outputs](figures/final_cases_comparison_1.svg)
 
-**3. Benign lesion incorrectly classified as melanoma by both models: `ISIC_7194471`.** Dense hair and irregular pigmentation remain visible after cropping. Probability decreases from about 0.857 for baseline to 0.278 for Siamese, but both still exceed their binary thresholds. The lower Siamese score therefore remains a false positive. The image suggests visual ambiguity; it does not establish hair as the cause.
+**3. Benign lesion incorrectly classified as melanoma by both models: `ISIC_7194471`.** Dense hair and irregular pigmentation remain visible after cropping. Probability decreases from about 0.857 for the baseline to 0.278 for Siamese, but both still exceed their binary thresholds. The lower Siamese score therefore remains a false positive. The image suggests visual ambiguity; it does not establish hair as the cause.
 
 **4. Benign lesion incorrectly classified as melanoma by both models: `ISIC_9743014`.** A dark centre and red surrounding area dominate the crop. Siamese probability is lower (about 0.098 versus 0.779), yet the decision remains an incorrect melanoma classification. Pigmentation and redness are plausible sources of confusion, but their individual effects were not isolated.
 
@@ -324,9 +324,9 @@ Main-process RSS excludes loader workers. The available measurements support loc
 
 ## Recommendation and Limitations
 
-The baseline should be maintained as the classification research benchmark as it has higher mean AP and a simpler objective. The siamese model remains a useful comparison for referral research: its combined policy has slightly higher observed mean capture at similar workload, and it captures one of the melanomas that the baseline misses. To further validate these results, additional data should be obtained from new patients and the models validated further with more test runs.
+The baseline should remain the classification research benchmark because it has higher mean AP and a simpler objective. The Siamese model remains a useful comparison for referral research: its combined policy has slightly higher observed mean capture at similar workload, and it captures one of the melanomas that the baseline misses. Further validation should use data from new patients and additional evaluation runs.
 
-The current review policy, sends ~32% of images to a specialist and mean melanoma capture is 89–91%. The remaining cases should not be treated as safely benign, as some melanomas can get through. Capture is below the calibration target and this additionally does not account for human diagnostic accuracy.
+The current review policy sends approximately 32% of images to a specialist, with mean melanoma capture of 89–91%. The remaining cases should not be treated as safely benign because some melanomas are missed. Capture is below the calibration target and does not account for human diagnostic accuracy.
 
 The main limitations are the small melanoma sample and use of a single dataset. Further work should examine broader patient cohorts, stronger calibration evidence and controlled investigation of image artifacts.
 
