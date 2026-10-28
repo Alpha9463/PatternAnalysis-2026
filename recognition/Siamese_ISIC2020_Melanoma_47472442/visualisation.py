@@ -1,6 +1,8 @@
-"""SVG figures for the report: architecture, training curves, ROC/PR/reliability, embeddings, cases.
+"""Save SVG figures for model structure, metrics and image comparisons.
 
-    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.visualisation  # redraws the architecture
+Plotting functions create parent directories and replace existing SVGs.
+Run this module to redraw the architecture figure in the package's figures
+directory. No model training or inference is performed here.
 """
 
 from pathlib import Path
@@ -22,6 +24,16 @@ COLOURS = {0: "#1f77b4", 1: "#c45c35"}  # benign, melanoma
 
 
 def _save(figure: Figure, path: Path) -> None:
+    """Save an SVG figure and close it.
+
+    Parameters
+    ----------
+    figure : matplotlib.figure.Figure
+        Figure to lay out, save and close.
+    path : pathlib.Path
+        Destination SVG file. Parent directories are created, and any
+        existing file is replaced.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.tight_layout(h_pad=2)
     figure.savefig(path, format="svg", bbox_inches="tight", metadata={"Date": None})
@@ -30,6 +42,18 @@ def _save(figure: Figure, path: Path) -> None:
 
 
 def _thumbnail(path: Path) -> Image.Image:
+    """Read an oriented RGB thumbnail without cropping the image.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Image file to open.
+
+    Returns
+    -------
+    PIL.Image.Image
+        RGB image at most 512 pixels per side, keeping its aspect ratio.
+    """
     with Image.open(path) as image:
         image.draft("RGB", (512, 512))
         image = ImageOps.exif_transpose(image).convert("RGB")
@@ -38,7 +62,7 @@ def _thumbnail(path: Path) -> Image.Image:
 
 
 def plot_architecture(path: Path) -> None:
-    """Draw the forward pass, combined loss and feedback to trainable weights.
+    """Draw the forward pass, combined loss and weight updates.
 
     Parameters
     ----------
@@ -92,7 +116,17 @@ def plot_architecture(path: Path) -> None:
 
 
 def plot_training_history(history: list[dict[str, float]], path: Path) -> None:
-    """Training/selection losses and selection AUROC/AP per epoch."""
+    """Save training losses and selection ranking scores by epoch.
+
+    Parameters
+    ----------
+    history : list of dict of str to float
+        Epoch records containing epoch, train_cross_entropy,
+        train_contrastive, selection_cross_entropy, selection_auroc and
+        selection_average_precision.
+    path : pathlib.Path
+        Destination SVG file.
+    """
     epochs = [h["epoch"] for h in history]
     figure, (losses, ranking) = plt.subplots(1, 2, figsize=(11, 4))
     for key, label in (
@@ -116,16 +150,26 @@ def reliability_bins(labels: np.ndarray, probabilities: np.ndarray) -> tuple[np.
 
     Parameters
     ----------
-    labels : numpy.ndarray
-        Binary image labels.
-    probabilities : numpy.ndarray
+    labels : numpy.ndarray of shape (images,)
+        Class labels: 0 for benign and 1 for melanoma.
+    probabilities : numpy.ndarray of shape (images,)
         Calibrated melanoma probabilities.
 
     Returns
     -------
-    predicted, observed, positives, counts : tuple of numpy.ndarray
-        Mean probability, melanoma fraction, melanoma count and image count
-        for each nonempty bin. Equal scores stay in the same bin.
+    predicted : numpy.ndarray of shape (occupied_bins,)
+        Mean probability in each nonempty bin.
+    observed : numpy.ndarray of shape (occupied_bins,)
+        Melanoma fraction in each nonempty bin.
+    positives : numpy.ndarray of shape (occupied_bins,)
+        Melanoma count in each nonempty bin.
+    counts : numpy.ndarray of shape (occupied_bins,)
+        Image count in each nonempty bin.
+
+    Notes
+    -----
+    Quantiles define up to eight occupied bins. Equal probabilities stay in
+    the same bin, and bins with no melanomas are retained if nonempty.
     """
     edges = np.quantile(probabilities, np.linspace(0, 1, 9))
     bins = np.searchsorted(edges[1:-1], probabilities)
@@ -137,7 +181,24 @@ def reliability_bins(labels: np.ndarray, probabilities: np.ndarray) -> tuple[np.
 
 
 def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores: np.ndarray, rule: dict, path: Path, title: str) -> None:
-    """ROC and precision-recall for both scores, plus a reliability diagram of the probabilities."""
+    """Save ROC, precision-recall and probability reliability plots.
+
+    Parameters
+    ----------
+    labels : numpy.ndarray of shape (images,)
+        Class labels: 0 for benign and 1 for melanoma.
+    probabilities : numpy.ndarray of shape (images,)
+        Calibrated classifier probabilities aligned with the labels.
+    reference_scores : numpy.ndarray of shape (images,)
+        Reference similarity scores aligned with the labels.
+    rule : dict
+        Fixed decision_threshold and reference_review_threshold values
+        used to mark operating points on ROC and precision-recall plots.
+    path : pathlib.Path
+        Destination SVG file.
+    title : str
+        Figure title identifying the model, seed or patient partition.
+    """
     figure, axes = plt.subplots(2, 4, figsize=(16, 7), gridspec_kw={"height_ratios": (3.8, 1.4)})
     roc, pr, reliability, bins_axis = axes[0]
     for axis in axes[1]:
@@ -190,7 +251,23 @@ def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores:
 
 
 def plot_embeddings(gallery: np.ndarray, gallery_labels: np.ndarray, queries: np.ndarray, query_labels: np.ndarray, path: Path, partition: str) -> None:
-    """PCA fitted on the training references only, then applied to the queries."""
+    """Save a two-dimensional PCA view of references and query embeddings.
+
+    Parameters
+    ----------
+    gallery : numpy.ndarray of shape (references, features)
+        Training reference embeddings used to fit PCA.
+    gallery_labels : numpy.ndarray of shape (references,)
+        Reference labels: 0 for benign and 1 for melanoma.
+    queries : numpy.ndarray of shape (images, features)
+        Query embeddings projected using the fitted reference PCA.
+    query_labels : numpy.ndarray of shape (images,)
+        Query labels: 0 for benign and 1 for melanoma.
+    path : pathlib.Path
+        Destination SVG file.
+    partition : str
+        Patient partition name shown in the title and legend.
+    """
     pca = PCA(n_components=2).fit(gallery)
     references, projected = pca.transform(gallery), pca.transform(queries)
     figure, axis = plt.subplots(figsize=(8, 6))
@@ -204,7 +281,21 @@ def plot_embeddings(gallery: np.ndarray, gallery_labels: np.ndarray, queries: np
 
 
 def plot_cases(cases: list[dict], path: Path) -> None:
-    """Each row: a query image beside its nearest training reference."""
+    """Save query images beside their nearest training references.
+
+    Parameters
+    ----------
+    cases : list of dict
+        Nonempty case records containing path, image_name, actual,
+        probability, decision and reference_score for each query, plus
+        reference_path, reference_name and reference_actual for its match.
+    path : pathlib.Path
+        Destination SVG file.
+
+    Notes
+    -----
+    Images are thumbnails of the originals, not the model's input crops.
+    """
     figure, axes = plt.subplots(len(cases), 2, figsize=(7.5, 3.9 * len(cases)), squeeze=False)
     for (query, reference), case in zip(axes, cases):
         query.imshow(_thumbnail(case["path"]))
@@ -217,18 +308,25 @@ def plot_cases(cases: list[dict], path: Path) -> None:
 
 
 def plot_case_comparison(samples: list[Sample], predictions: dict[str, dict[str, np.ndarray]], image_size: int, path: Path) -> None:
-    """Show original images, actual evaluation crops and both models' results.
+    """Show original images, evaluation crops and both models' results.
 
     Parameters
     ----------
     samples : list of Sample
         The same selected cases for both models, in display order.
-    predictions : dict
-        Baseline and Siamese prediction arrays aligned with ``samples``.
+    predictions : dict of str to dict of str to numpy.ndarray
+        Baseline and Siamese entries keyed by baseline and siamese. Each
+        contains probability, reference_score and decision arrays aligned
+        with the selected samples.
     image_size : int
         Evaluation crop size from the saved training configuration.
     path : pathlib.Path
         Destination SVG file.
+
+    Notes
+    -----
+    Both models receive the same evaluation crop shown on the right. The
+    left caption gives baseline results; the right gives Siamese results.
     """
     dataset = ISICDataset(samples, image_size)
     figure, axes = plt.subplots(len(samples), 2, figsize=(8, 4.6 * len(samples)), squeeze=False)

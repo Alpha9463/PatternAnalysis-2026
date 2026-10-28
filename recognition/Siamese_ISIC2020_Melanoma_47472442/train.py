@@ -1,11 +1,9 @@
-"""Train the baseline or Siamese model, keep the best epoch and freeze its decision rules.
+"""Train a model, select its best epoch and freeze prediction rules.
 
-    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.train \
-        recognition/Siamese_ISIC2020_Melanoma_47472442/configs/siamese.yaml
-
-Selection patients choose the epoch; calibration patients fit the probability
-scaling, thresholds and reference gallery rule. Final patients are never loaded
-here; ``predict.py`` scores them with the frozen checkpoint.
+Selection patients choose the epoch. Calibration patients fit probability
+scaling and thresholds. Final patients are never loaded here; the
+prediction module scores them with the saved checkpoint. The command
+accepts a YAML configuration path and optional run name and training seed.
 """
 
 import argparse
@@ -40,7 +38,30 @@ from .visualisation import plot_training_history
 
 
 def train_epoch(model, loader, optimizer, scheduler, device, config) -> dict[str, float]:
-    """One pass of cross-entropy plus weighted contrastive loss (weight 0 for the baseline)."""
+    """Train one epoch with classification and weighted contrastive loss.
+
+    Parameters
+    ----------
+    model : MelanomaModel
+        Model whose weights will be updated on the selected device.
+    loader : torch.utils.data.DataLoader
+        Training batches of image tensors and integer class labels.
+    optimizer : torch.optim.Optimizer
+        Optimizer updated after each batch.
+    scheduler : torch.optim.lr_scheduler.LRScheduler
+        Learning-rate scheduler advanced after each optimizer step.
+    device : torch.device
+        Device used for training.
+    config : dict
+        Settings containing label_smoothing, contrastive_margin and
+        contrastive_weight. A zero contrastive weight gives the baseline.
+
+    Returns
+    -------
+    dict of str to float
+        Mean batch losses under train_cross_entropy and train_contrastive.
+        The contrastive value is reported before weighting.
+    """
     model.train()
     totals = np.zeros(2)
     for images, labels in loader:
@@ -60,13 +81,32 @@ def train_epoch(model, loader, optimizer, scheduler, device, config) -> dict[str
 
 
 def reference_gallery(train: list[Sample], seed: int) -> list[Sample]:
-    """Every training melanoma plus an equal number of random training benign images."""
+    """Select a balanced reference gallery from training images.
+
+    Parameters
+    ----------
+    train : list of Sample
+        Training records with at least as many benign images as melanomas.
+    seed : int
+        Seed for selecting benign references without replacement.
+
+    Returns
+    -------
+    list of Sample
+        Every training melanoma, followed by an equal number of randomly
+        selected benign images.
+    """
     melanomas = [s for s in train if s.label == 1]
     benign = random.Random(seed).sample([s for s in train if s.label == 0], len(melanomas))
     return melanomas + benign
 
 
 def main() -> None:
+    """Train and calibrate a model using command-line settings.
+
+    Write checkpoint.pt, metrics.json and training.svg to a new run folder
+    under ``data/runs/``. Refuse to overwrite an existing run directory.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("config", type=Path, help="YAML hyperparameters, e.g. configs/siamese.yaml")
     parser.add_argument("--run-name", help="output folder under data/runs (default: config name)")

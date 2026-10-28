@@ -1,8 +1,8 @@
-"""ISIC 2020 loading, patient-level splits, augmentation and class-balanced sampling.
+"""Load ISIC images, split patients and sample training batches.
 
-Images and ``ISIC_2020_Training_GroundTruth_v2.csv`` live under repository ``data/``.
-Create the fixed patient split once with
-``python -m recognition.Siamese_ISIC2020_Melanoma_47472442.dataset``.
+Images and ``ISIC_2020_Training_GroundTruth_v2.csv`` live under repository
+``data/``. Run this module to write the fixed patient split and print the
+image, patient and melanoma counts for each role.
 """
 
 import csv
@@ -23,6 +23,20 @@ MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)  # ImageNet RGB statist
 
 
 class Sample(NamedTuple):
+    """Store the identity, class and file path of one labelled image.
+
+    Parameters
+    ----------
+    image_name : str
+        ISIC image identifier without the file extension.
+    patient_id : str
+        Patient identifier used to keep images in the same split.
+    label : int
+        Class label: 0 for benign and 1 for melanoma.
+    path : pathlib.Path
+        Location of the JPEG image.
+    """
+
     image_name: str
     patient_id: str
     label: int  # 0 benign, 1 melanoma
@@ -30,7 +44,19 @@ class Sample(NamedTuple):
 
 
 def read_samples(metadata_csv: Path = METADATA_CSV) -> list[Sample]:
-    """Read labelled images in CSV order, locating each JPEG anywhere under ``data/``."""
+    """Match metadata rows to JPEG images under the data directory.
+
+    Parameters
+    ----------
+    metadata_csv : pathlib.Path, optional
+        ISIC metadata CSV. Defaults to the file under repository ``data/``.
+        Every listed image must have a matching JPEG there.
+
+    Returns
+    -------
+    list of Sample
+        Labelled image records in CSV row order.
+    """
     paths = {path.stem: path for path in DATA_DIR.rglob("*.jpg")}
     with metadata_csv.open(newline="") as stream:
         return [
@@ -40,7 +66,23 @@ def read_samples(metadata_csv: Path = METADATA_CSV) -> list[Sample]:
 
 
 def _split_patients(labels: dict[str, int], fractions: tuple[float, ...], seed: int) -> list[list[str]]:
-    """Shuffle melanoma and melanoma-free patients separately, cut off each fraction, keep the rest last."""
+    """Split patients, stratified by whether they have melanoma.
+
+    Parameters
+    ----------
+    labels : dict of str to int
+        Patient identifiers mapped to 1 if any image is melanoma, else 0.
+    fractions : tuple of float
+        Fractions of each label group assigned to successive partitions.
+        The last partition receives the remaining patients.
+    seed : int
+        Seed for shuffling patients within each label group.
+
+    Returns
+    -------
+    list of list of str
+        Sorted patient identifiers for each fraction, then the remainder.
+    """
     rng = random.Random(seed)
     groups: list[list[str]] = [[] for _ in range(len(fractions) + 1)]
     for label in (0, 1):
@@ -56,10 +98,21 @@ def _split_patients(labels: dict[str, int], fractions: tuple[float, ...], seed: 
 
 
 def create_splits(samples: list[Sample], output: Path = SPLIT_FILE) -> None:
-    """Assign whole patients to roles, stratified by whether the patient has any melanoma.
+    """Write fixed patient groups stratified by melanoma presence.
 
-    ``development`` patients were examined in early experiments; they now only add
-    training data (see ``load_splits``) and are never used for evaluation.
+    Parameters
+    ----------
+    samples : list of Sample
+        Labelled images whose patients will be assigned to groups.
+    output : pathlib.Path, optional
+        Destination JSON file, defaulting to
+        ``data/splits/isic_protocol.json``. Parent directories are created;
+        an existing file is replaced.
+
+    Notes
+    -----
+    Save fit, development, selection, calibration and final patient groups.
+    `load_splits` combines fit and development patients for training.
     """
     labels: dict[str, int] = {}
     for sample in samples:
@@ -73,7 +126,22 @@ def create_splits(samples: list[Sample], output: Path = SPLIT_FILE) -> None:
 
 
 def load_splits(samples: list[Sample], split_file: Path = SPLIT_FILE) -> dict[str, list[Sample]]:
-    """Return image samples for ``train``, ``selection``, ``calibration`` and ``final`` patients."""
+    """Group images using the saved patient assignments.
+
+    Parameters
+    ----------
+    samples : list of Sample
+        Labelled image records.
+    split_file : pathlib.Path, optional
+        Patient groups, defaulting to ``data/splits/isic_protocol.json``.
+
+    Returns
+    -------
+    dict of str to list of Sample
+        Image records for train, selection, calibration and final roles.
+        Training combines the saved fit and development groups. Image order
+        within each role follows the input records.
+    """
     partitions = json.loads(split_file.read_text())["partitions"]
     roles = {
         "train": set(partitions["fit"] + partitions["development"]),
@@ -85,9 +153,30 @@ def load_splits(samples: list[Sample], split_file: Path = SPLIT_FILE) -> dict[st
 
 
 class ISICDataset(Dataset):
-    """Decode, augment (training only) and normalise lesion images to ``image_size`` squares."""
+    """Load RGB lesion images as normalised square tensors.
+
+    Parameters
+    ----------
+    samples : list of Sample
+        Labelled image records in dataset order.
+    image_size : int
+        Output height and width in pixels.
+    train : bool, optional
+        Apply random crops, flips, rotation and colour jitter if True.
+        Default is False, which uses resizing and a centre crop.
+
+    Attributes
+    ----------
+    samples : list of Sample
+        Image records supplied to the dataset.
+    image_size : int
+        Output side length in pixels.
+    transform : torchvision.transforms.Compose
+        Image preparation followed by ImageNet RGB normalisation.
+    """
 
     def __init__(self, samples: list[Sample], image_size: int, train: bool = False) -> None:
+        """Store the image records and build the image transformations."""
         self.samples = samples
         self.image_size = image_size
         geometry = (
@@ -106,22 +195,49 @@ class ISICDataset(Dataset):
         self.transform = transforms.Compose([*geometry, transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
 
     def __len__(self) -> int:
+        """Return the number of labelled images."""
         return len(self.samples)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+        """Load and transform one image and return its label.
+
+        Parameters
+        ----------
+        index : int
+            Position of the image record in the dataset.
+
+        Returns
+        -------
+        image : torch.Tensor of shape (3, image_size, image_size)
+            RGB image after transforms and ImageNet normalisation.
+        label : int
+            Class label: 0 for benign and 1 for melanoma.
+        """
         sample = self.samples[index]
         with Image.open(sample.path) as image:
-            # JPEG draft mode decodes straight to >= image_size: ~4x faster on 6000x4000 photos
+            # Draft decoding reduces JPEG decoding work before resizing.
             image.draft("RGB", (self.image_size, self.image_size))
             image = ImageOps.exif_transpose(image).convert("RGB")
         return cast(torch.Tensor, self.transform(image)), sample.label
 
 
 def melanoma_sampler(samples: list[Sample], melanoma_fraction: float, seed: int) -> WeightedRandomSampler:
-    """Draw one epoch of ``len(samples)`` images, a ``melanoma_fraction`` share of them melanoma.
+    """Build a sampler with a target melanoma share per epoch.
 
-    Moderate oversampling keeps melanomas in most batches (needed for contrastive
-    pairs) without repeating the few training melanomas so often they are memorised.
+    Parameters
+    ----------
+    samples : list of Sample
+        Training records containing both classes.
+    melanoma_fraction : float
+        Expected melanoma fraction across draws, between 0 and 1.
+    seed : int
+        Seed for the sampler's random generator.
+
+    Returns
+    -------
+    torch.utils.data.WeightedRandomSampler
+        Draws ``len(samples)`` indices with replacement per epoch.
+        Individual batches and epochs can differ from the target fraction.
     """
     melanomas = sum(s.label for s in samples)
     weights = [melanoma_fraction / melanomas if s.label else (1 - melanoma_fraction) / (len(samples) - melanomas) for s in samples]

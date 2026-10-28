@@ -1,11 +1,9 @@
-"""Reproduce report tables and selected SVGs from saved runs, without model inference.
-
-    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.summarise
-    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.summarise --figures recognition/Siamese_ISIC2020_Melanoma_47472442/figures
+"""Reproduce report tables and selected SVGs without model inference.
 
 Main runs are baseline/siamese for seed 42 and <model>_seed<seed> for
 43, 44, 67 and 69. Saved CSV scores are rounded; stored decisions define
-binary negatives.
+binary negatives. Run this module to print Markdown table rows, use --json
+for named row groups, or pass --figures to also redraw selected SVGs.
 """
 
 import argparse
@@ -33,18 +31,50 @@ HEADERS = {
 
 
 def run_path(runs: Path, model: str, seed: int) -> Path:
-    """Return the saved run directory for one model and seed."""
+    """Return the saved run directory for one model and seed.
+
+    Parameters
+    ----------
+    runs : pathlib.Path
+        Parent directory containing the saved runs.
+    model : {'baseline', 'siamese'}
+        Model name used in the run directory.
+    seed : int
+        Training seed. Seed 42 uses the bare model name; other seeds use
+        the model name followed by _seed and the seed number.
+
+    Returns
+    -------
+    pathlib.Path
+        Run directory path, without checking that it exists.
+    """
     return runs / (model if seed == 42 else f"{model}_seed{seed}")
 
 
 def mean_sd(values: list[float], digits: int = 3, scale: float = 1) -> str:
-    """Format a mean and sample standard deviation over trained seeds."""
+    """Format a mean and sample standard deviation over trained seeds.
+
+    Parameters
+    ----------
+    values : list of float
+        Measurements from at least two trained seeds.
+    digits : int, optional
+        Decimal places for both values. Default is 3.
+    scale : float, optional
+        Multiplier applied before summarising. Default is 1; use 100 to
+        express fractions as percentages.
+
+    Returns
+    -------
+    str
+        Formatted mean and sample standard deviation separated by ±.
+    """
     array = np.asarray(values) * scale
     return f"{array.mean():.{digits}f} ± {array.std(ddof=1):.{digits}f}"
 
 
 def report_tables(runs: Path) -> dict[str, str]:
-    """Calculate the report's aggregate rows from existing metrics and CSVs.
+    """Calculate report table rows from saved metrics and predictions.
 
     Parameters
     ----------
@@ -54,8 +84,14 @@ def report_tables(runs: Path) -> dict[str, str]:
     Returns
     -------
     dict of str to str
-        Named Markdown table rows. Metrics use saved full-precision summaries;
+        Named Markdown table rows. Metrics use full-precision summaries;
         negative-subgroup AUROCs use the available rounded CSV scores.
+
+    Notes
+    -----
+    All final prediction files must have matching image identifiers,
+    patient identifiers and labels in the same order. Computational cost
+    and confusion counts describe seed 42; aggregate rows use five seeds.
     """
     final = {m: [json.loads((run_path(runs, m, s) / "final/metrics.json").read_text()) for s in SEEDS] for m in MODELS}
     calibration = {m: [json.loads((run_path(runs, m, s) / "calibration/metrics.json").read_text()) for s in SEEDS] for m in MODELS}
@@ -136,14 +172,21 @@ def report_tables(runs: Path) -> dict[str, str]:
 
 
 def redraw_figures(runs: Path, output: Path) -> None:
-    """Replot seed-42 scores and matched image crops without loading weights.
+    """Replot seed-42 scores and matched crops without loading weights.
 
     Parameters
     ----------
     runs : pathlib.Path
-        Saved run directory.
+        Parent directory containing the baseline and Siamese seed-42 runs.
     output : pathlib.Path
-        Destination directory for report SVGs. Original run files are untouched.
+        Destination directory for report SVGs. Matching files are replaced;
+        saved run files are unchanged.
+
+    Notes
+    -----
+    Redraws score curves and five matched failure examples, including a
+    melanoma labelled benign by both complete review policies. Image crops
+    use the image size from configs/baseline.yaml and the original JPEGs.
     """
     predictions = {m: read_predictions(runs / m / "final/predictions.csv") for m in MODELS}
     training = {m: json.loads((runs / m / "metrics.json").read_text()) for m in MODELS}
@@ -170,6 +213,11 @@ def redraw_figures(runs: Path, output: Path) -> None:
 
 
 def main() -> None:
+    """Print saved-result tables and optionally redraw report figures.
+
+    Read run and figure directories and the JSON output option from the
+    command line. Default output is Markdown; no model weights are loaded.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=Path, default=DATA_DIR / "runs")
     parser.add_argument("--figures", type=Path, help="also regenerate selected report SVGs from saved data")

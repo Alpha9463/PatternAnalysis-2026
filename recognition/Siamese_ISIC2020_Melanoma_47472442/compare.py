@@ -1,12 +1,12 @@
-"""Paired patient bootstrap of baseline versus Siamese predictions on the same patients.
+"""Compare matched predictions with a paired patient bootstrap.
 
-    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.compare \
-        data/runs/baseline/final/predictions.csv data/runs/siamese/final/predictions.csv
+The command accepts baseline and Siamese prediction CSVs with matching
+image and patient order. Each draw resamples whole patients, stratified by
+melanoma presence, and scores both models on that draw. Print estimates and
+95% percentile intervals as a Markdown table.
 
-Each draw resamples whole patients (stratified by whether they have a melanoma) and
-scores both models on that draw, following Field and Welsh (2007),
-https://doi.org/10.1111/j.1467-9868.2007.00593.x. Prints a Markdown table of
-estimates with 95% percentile intervals.
+Patient resampling follows Field and Welsh (2007),
+https://doi.org/10.1111/j.1467-9868.2007.00593.x.
 """
 
 import argparse
@@ -19,6 +19,20 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 def read_predictions(path: Path) -> dict[str, np.ndarray]:
+    """Read saved image predictions into arrays in CSV row order.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Prediction CSV written by the prediction command.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        Image names, patient identifiers, integer labels, probabilities,
+        reference scores and decision strings. The CSV actual column is
+        returned as label; all arrays have one entry per image.
+    """
     with path.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     return {
@@ -32,7 +46,24 @@ def read_predictions(path: Path) -> dict[str, np.ndarray]:
 
 
 def summarise(run: dict[str, np.ndarray], index: np.ndarray) -> np.ndarray:
-    """AUROC, AP, decision recall/precision/accuracy, review workload and melanoma capture."""
+    """Calculate classification and review measures for selected images.
+
+    Parameters
+    ----------
+    run : dict of str to numpy.ndarray
+        Aligned prediction arrays returned by `read_predictions`.
+    index : numpy.ndarray of int
+        Image indices to include. Repeated indices represent bootstrap
+        draws that select the same patient more than once.
+
+    Returns
+    -------
+    numpy.ndarray of shape (7,)
+        AUROC, melanoma AP, classifier recall, precision, accuracy, review
+        workload and melanoma capture, in that order. A melanoma decision
+        is classifier-positive; melanoma and review decisions both count
+        towards specialist review.
+    """
     labels, decision = run["label"][index], run["decision"][index]
     flagged, reviewed = decision == "melanoma", decision != "benign"
     return np.array([
@@ -50,6 +81,12 @@ NAMES = ("AUROC", "Melanoma AP", "Decision recall", "Decision precision", "Decis
 
 
 def main() -> None:
+    """Print paired patient-bootstrap intervals for two prediction CSVs.
+
+    Read baseline and Siamese paths and an optional draw count from the
+    command line. Both files must list the same images in the same order.
+    Resample patients with seed 42 and print a Markdown comparison table.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("baseline", type=Path)
     parser.add_argument("siamese", type=Path)
@@ -74,6 +111,18 @@ def main() -> None:
     estimates = np.stack([summarise(baseline, everyone), summarise(siamese, everyone)])
 
     def interval(values: np.ndarray) -> str:
+        """Format the central 95% percentile interval of bootstrap values.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Bootstrap estimates. NaN values are ignored.
+
+        Returns
+        -------
+        str
+            Lower and upper bounds in brackets, rounded to four decimals.
+        """
         low, high = np.nanpercentile(values, [2.5, 97.5])
         return f"[{low:.4f}, {high:.4f}]"
 

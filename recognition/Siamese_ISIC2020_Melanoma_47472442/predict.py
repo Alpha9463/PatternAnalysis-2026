@@ -1,13 +1,11 @@
-"""Load a trained checkpoint, triage one patient group, print every prediction and save evidence.
+"""Score a patient group using a trained checkpoint and fixed rules.
 
-    python -m recognition.Siamese_ISIC2020_Melanoma_47472442.predict \
-        data/runs/siamese/checkpoint.pt --partition calibration
-
-Triage uses the rules frozen on calibration patients: classifier probability >=
-decision threshold -> "melanoma"; otherwise reference score >= reference review
-threshold -> "review"; otherwise "benign". The classifier's own review threshold
-is still scored for comparison but swings far more between seeds.
-Outputs (predictions.csv, metrics.json, SVG figures) go to ``<run>/<partition>/``.
+Rules are frozen on calibration patients. Output melanoma if classifier
+probability reaches its decision threshold; otherwise output review if the
+reference score reaches its review threshold; otherwise output benign. The
+classifier's own review threshold is also scored for comparison. The
+command accepts a checkpoint path and an optional partition, defaulting to
+calibration. Predictions, metrics and SVGs go under ``<run>/<partition>/``.
 """
 
 import argparse
@@ -37,7 +35,23 @@ from .visualisation import plot_cases, plot_curves, plot_embeddings
 
 @torch.no_grad()
 def batch_latency_ms(model: MelanomaModel, config: dict, device: torch.device) -> float:
-    """Mean forward time of one preloaded batch (no image loading), after 3 warm-up passes."""
+    """Measure mean forward time for a preloaded batch.
+
+    Parameters
+    ----------
+    model : MelanomaModel
+        Model already in evaluation mode and on the selected device.
+    config : dict
+        Settings containing batch_size and image_size.
+    device : torch.device
+        Device used for the forward passes and timing synchronisation.
+
+    Returns
+    -------
+    float
+        Mean batch latency in milliseconds over ten passes after three
+        warm-up passes. Uses random inputs and excludes image loading.
+    """
     batch = torch.randn(config["batch_size"], 3, config["image_size"], config["image_size"], device=device)
     started = time.perf_counter()
     for repeat in range(13):
@@ -51,6 +65,12 @@ def batch_latency_ms(model: MelanomaModel, config: dict, device: torch.device) -
 
 
 def main() -> None:
+    """Score a checkpoint and patient group from command-line arguments.
+
+    Print predictions to standard output and summary metrics to standard
+    error. Save predictions.csv, metrics.json and SVG figures in the
+    checkpoint's partition folder, replacing files with matching names.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--partition", choices=("selection", "calibration", "final"), default="calibration")

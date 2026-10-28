@@ -1,7 +1,9 @@
-"""Shared ResNet-18 encoder, melanoma classifier head and Siamese contrastive loss.
+"""Define the shared encoder, classifier and embedding comparisons.
 
-Encoder: He et al., Deep Residual Learning, https://arxiv.org/abs/1512.03385
-Contrastive loss: Hadsell et al., CVPR 2006, https://doi.org/10.1109/CVPR.2006.100
+Encoder: He et al., Deep Residual Learning,
+https://arxiv.org/abs/1512.03385.
+Contrastive loss: Hadsell et al., CVPR 2006,
+https://doi.org/10.1109/CVPR.2006.100.
 """
 
 from typing import cast
@@ -13,30 +15,69 @@ from torchvision.models import ResNet18_Weights, resnet18
 
 
 class MelanomaModel(nn.Module):
-    """ResNet-18 shared by every image: one pass gives class logits and an embedding.
+    """Extract class logits and embeddings with a shared ResNet-18.
 
-    The 512 backbone features feed a linear benign/melanoma classifier; the same
-    features scaled to unit length form the embedding compared between images.
+    Parameters
+    ----------
+    pretrained : bool, optional
+        Load ImageNet V1 encoder weights if True. Default is False.
+
+    Attributes
+    ----------
+    encoder : torch.nn.Module
+        ResNet-18 with its final classifier replaced by an identity layer.
+    classifier : torch.nn.Linear
+        Linear head mapping 512 features to benign and melanoma logits.
     """
 
     def __init__(self, pretrained: bool = False) -> None:
+        """Initialize the encoder and classification head."""
         super().__init__()
         self.encoder = cast(nn.Module, resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None))
         self.encoder.fc = nn.Identity()
         self.classifier = nn.Linear(512, 2)
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``[batch, 2]`` logits and ``[batch, 512]`` unit-length embeddings."""
+        """Encode an RGB batch for classification and image comparison.
+
+        Parameters
+        ----------
+        images : torch.Tensor of shape (batch, 3, height, width)
+            Normalised RGB images.
+
+        Returns
+        -------
+        logits : torch.Tensor of shape (batch, 2)
+            Unnormalised scores, ordered benign then melanoma.
+        embeddings : torch.Tensor of shape (batch, 512)
+            Unit-length encoder features for distance comparisons.
+        """
         features = self.encoder(images)
         return self.classifier(features), F.normalize(features, dim=1)
 
 
 def contrastive_loss(embeddings: torch.Tensor, labels: torch.Tensor, margin: float) -> torch.Tensor:
-    """Contrastive loss over every image pair in the batch (Siamese pairs share all weights).
+    """Compute contrastive loss over all distinct image pairs in a batch.
 
-    Same-class pairs are pulled together (squared distance); different-class pairs
-    are pushed until they are at least ``margin`` apart. The same-class and
-    different-class terms are averaged separately to balance their contributions.
+    Parameters
+    ----------
+    embeddings : torch.Tensor of shape (batch, features)
+        Unit-length embeddings produced by the shared encoder.
+    labels : torch.Tensor of shape (batch,)
+        Class labels: 0 for benign and 1 for melanoma.
+    margin : float
+        Minimum desired distance between different-class embeddings.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss with gradients for the input embeddings.
+
+    Notes
+    -----
+    Same-class pairs are pulled together using squared distance.
+    Different-class pairs are penalised only below the margin. Each pair is
+    counted once, and the two pair types are averaged separately and added.
     Benign pairs still dominate within the same-class term.
     """
     squared = (2 - 2 * embeddings @ embeddings.T).clamp_min(1e-12)  # unit vectors: |a-b|^2 = 2 - 2a.b
@@ -45,20 +86,35 @@ def contrastive_loss(embeddings: torch.Tensor, labels: torch.Tensor, margin: flo
     positive, negative = (same & pairs).float(), (~same & pairs).float()
     pull = squared
     push = F.relu(margin - squared.sqrt()).square()
-    # clamp_min(1) keeps the rare melanoma-free batch from dividing by zero
+    # A batch with only one class has no different-class pairs.
     return (pull * positive).sum() / positive.sum().clamp_min(1) + (push * negative).sum() / negative.sum().clamp_min(1)
 
 
 def nearest_references(
     queries: torch.Tensor, references: torch.Tensor, reference_labels: torch.Tensor, neighbours: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Siamese comparison with labelled training references.
+    """Find the nearest reference and a melanoma similarity score.
 
-    Returns each query's nearest reference index ``[queries]`` and its reference
-    score ``d_benign / (d_benign + d_melanoma)``, where each ``d`` is the mean distance
-    to the ``neighbours`` closest references of that class: 0.5 is equidistant and
-    higher is more melanoma-like. Unlike a neighbour vote it is continuous, so a
-    recall threshold never collapses onto a tie.
+    Parameters
+    ----------
+    queries : torch.Tensor of shape (queries, features)
+        Query embeddings on the same device as the references.
+    references : torch.Tensor of shape (references, features)
+        Embeddings from labelled training images.
+    reference_labels : torch.Tensor of shape (references,)
+        Reference labels: 0 for benign and 1 for melanoma.
+    neighbours : int
+        Number of nearest references to average per class. Each class must
+        contain at least this many references.
+
+    Returns
+    -------
+    nearest : torch.Tensor of shape (queries,)
+        Index of each query's closest reference across both classes.
+    scores : torch.Tensor of shape (queries,)
+        Mean benign distance divided by the sum of mean benign and melanoma
+        distances. Higher values indicate greater melanoma similarity;
+        0.5 means equal mean distances. This score is not a probability.
     """
     distances = torch.cdist(queries, references)
     benign, melanoma = (distances[:, reference_labels == label].topk(neighbours, largest=False).values.mean(dim=1) for label in (0, 1))

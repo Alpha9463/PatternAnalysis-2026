@@ -1,4 +1,4 @@
-"""Device selection, image scoring, calibration, thresholds and metrics shared by train and predict."""
+"""Share helpers for devices, scoring, calibration and metrics."""
 
 import random
 import resource
@@ -17,27 +17,78 @@ from .modules import MelanomaModel
 
 
 def set_seed(seed: int) -> None:
+    """Seed the Python, NumPy and PyTorch random generators.
+
+    Parameters
+    ----------
+    seed : int
+        Seed shared by the three generators.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
 def select_device() -> torch.device:
-    """Prefer CUDA, then Apple MPS, then CPU."""
+    """Choose the first available device: CUDA, Apple MPS, then CPU.
+
+    Returns
+    -------
+    torch.device
+        Device used for training or prediction.
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
 def image_loader(samples: list[Sample], config: dict, train: bool = False, sampler=None) -> DataLoader:
-    """Batch images with parallel JPEG decoding; workers persist across epochs."""
+    """Build an image loader with workers that persist across epochs.
+
+    Parameters
+    ----------
+    samples : list of Sample
+        Labelled image records.
+    config : dict
+        Settings containing image_size, batch_size and workers. The worker
+        count must be positive because persistent workers are enabled.
+    train : bool, optional
+        Enable training augmentation if True. Default is False.
+    sampler : torch.utils.data.Sampler or None, optional
+        Sample indices in this order. Default is None, which preserves the
+        input order without shuffling.
+
+    Returns
+    -------
+    torch.utils.data.DataLoader
+        Batches of normalised RGB image tensors and integer class labels.
+    """
     dataset = ISICDataset(samples, config["image_size"], train)
     return DataLoader(dataset, config["batch_size"], sampler=sampler, num_workers=config["workers"], persistent_workers=True)
 
 
 @torch.no_grad()
 def score_images(model: MelanomaModel, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, torch.Tensor, np.ndarray]:
-    """Return melanoma logit margins (log-odds), CPU embeddings and labels in loader order."""
+    """Score images without gradients and return results in loader order.
+
+    Parameters
+    ----------
+    model : MelanomaModel
+        Model on the selected device. It is left in evaluation mode.
+    loader : torch.utils.data.DataLoader
+        Batches of image tensors and integer labels.
+    device : torch.device
+        Device used for the forward passes.
+
+    Returns
+    -------
+    margins : numpy.ndarray of shape (images,)
+        Melanoma logit minus benign logit, before calibration.
+    embeddings : torch.Tensor of shape (images, 512)
+        Unit-length image embeddings stored on the CPU.
+    labels : numpy.ndarray of shape (images,)
+        Class labels: 0 for benign and 1 for melanoma.
+    """
     model.eval()
     margins, embeddings, labels = [], [], []
     for images, targets in loader:
@@ -51,32 +102,104 @@ def score_images(model: MelanomaModel, loader: DataLoader, device: torch.device)
 
 
 def fit_platt(margins: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
-    """Platt scaling: fit p = sigmoid(a * margin + b) on calibration patients.
+    """Fit a logistic mapping from logit margins to probabilities.
 
-    Ranking is unchanged; probabilities are corrected for the oversampled training
-    prevalence and label smoothing, so thresholds and confidences are interpretable.
+    Parameters
+    ----------
+    margins : numpy.ndarray of shape (images,)
+        Melanoma logit minus benign logit for calibration images.
+    labels : numpy.ndarray of shape (images,)
+        Calibration labels: 0 for benign and 1 for melanoma.
+
+    Returns
+    -------
+    tuple of float
+        Slope and intercept for ``p = sigmoid(a * margin + b)``.
     """
     model = LogisticRegression(C=1e6).fit(margins[:, None], labels)
     return float(model.coef_[0, 0]), float(model.intercept_[0])
 
 
 def melanoma_probability(margins: np.ndarray, platt: tuple[float, float]) -> np.ndarray:
+    """Apply the fitted logistic mapping to melanoma logit margins.
+
+    Parameters
+    ----------
+    margins : numpy.ndarray of shape (images,)
+        Melanoma logit minus benign logit.
+    platt : tuple of float
+        Slope and intercept returned by `fit_platt`.
+
+    Returns
+    -------
+    numpy.ndarray of shape (images,)
+        Calibrated melanoma probabilities.
+    """
     return 1 / (1 + np.exp(-(platt[0] * margins + platt[1])))
 
 
 def recall_threshold(labels: np.ndarray, scores: np.ndarray, recall: float) -> float:
-    """Highest threshold that still flags at least ``recall`` of the melanomas (score >= threshold)."""
+    """Choose the highest observed cutoff meeting the recall target.
+
+    Parameters
+    ----------
+    labels : numpy.ndarray of shape (images,)
+        Class labels with at least one melanoma, labelled 1.
+    scores : numpy.ndarray of shape (images,)
+        Scores where higher values indicate melanoma.
+    recall : float
+        Required melanoma recall, greater than 0 and at most 1.
+
+    Returns
+    -------
+    float
+        Cutoff meeting the target on these images when scores at or above
+        it are flagged. Ties can produce higher recall than requested.
+    """
     melanoma_scores = np.sort(scores[labels == 1])[::-1]
     return float(melanoma_scores[ceil(recall * len(melanoma_scores)) - 1])
 
 
 def specificity_threshold(labels: np.ndarray, scores: np.ndarray, specificity: float) -> float:
-    """Threshold leaving ``specificity`` of benign images below it."""
+    """Choose a cutoff from the benign score distribution.
+
+    Parameters
+    ----------
+    labels : numpy.ndarray of shape (images,)
+        Class labels with at least one benign image, labelled 0.
+    scores : numpy.ndarray of shape (images,)
+        Scores where higher values indicate melanoma.
+    specificity : float
+        Target benign specificity, between 0 and 1.
+
+    Returns
+    -------
+    float
+        Benign score quantile at the requested specificity. Ties and
+        quantile interpolation can affect the achieved specificity.
+    """
     return float(np.quantile(scores[labels == 0], specificity))
 
 
 def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
-    """Per-class precision/recall/F1, macro-F1, accuracy and confusion counts at one threshold."""
+    """Summarise binary classification at a fixed score cutoff.
+
+    Parameters
+    ----------
+    labels : numpy.ndarray of shape (images,)
+        Class labels: 0 for benign and 1 for melanoma.
+    scores : numpy.ndarray of shape (images,)
+        Scores where higher values indicate melanoma.
+    threshold : float
+        Classify scores at or above this value as melanoma.
+
+    Returns
+    -------
+    dict of str to float or int
+        Cutoff, accuracy, macro-F1, both class precisions and recalls,
+        melanoma F1, flagged fraction and TN/FP/FN/TP counts. Undefined
+        precision, recall or F1 values are reported as zero.
+    """
     predicted = (scores >= threshold).astype(int)
     # average=None returns class-wise arrays; sklearn's annotations omit this case and numeric zero_division.
     precision, recall, f1, _ = cast(
@@ -99,13 +222,31 @@ def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) 
 
 
 def peak_process_memory_gib() -> float:
-    """Peak resident memory of this process (macOS reports bytes, Linux kilobytes)."""
+    """Return peak resident memory for the current process on macOS.
+
+    Returns
+    -------
+    float
+        Peak resident memory in GiB on macOS, excluding loader workers.
+    """
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak / (1 if sys.platform == "darwin" else 1024) / 2**30
 
 
 def accelerator_memory_gib(device: torch.device) -> float:
-    """GPU memory held now: MPS driver allocation (no peak counter exists) or CUDA peak reserved."""
+    """Read accelerator memory usage in GiB.
+
+    Parameters
+    ----------
+    device : torch.device
+        Accelerator whose allocator statistics will be read.
+
+    Returns
+    -------
+    float
+        Peak reserved CUDA memory, current MPS driver allocation or zero
+        for CPU. The MPS value is a snapshot rather than a measured peak.
+    """
     if device.type == "cuda":
         return torch.cuda.max_memory_reserved() / 2**30
     return torch.mps.driver_allocated_memory() / 2**30 if device.type == "mps" else 0.0
