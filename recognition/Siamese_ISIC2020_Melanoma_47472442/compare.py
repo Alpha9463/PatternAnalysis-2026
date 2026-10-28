@@ -22,9 +22,11 @@ def read_predictions(path: Path) -> dict[str, np.ndarray]:
     with path.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     return {
+        "image_name": np.array([r["image_name"] for r in rows]),
         "patient_id": np.array([r["patient_id"] for r in rows]),
         "label": np.array([int(r["actual"]) for r in rows]),
         "probability": np.array([float(r["probability"]) for r in rows]),
+        "reference_score": np.array([float(r["reference_score"]) for r in rows]),
         "decision": np.array([r["decision"] for r in rows]),
     }
 

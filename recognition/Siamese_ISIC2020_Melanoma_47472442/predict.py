@@ -79,7 +79,7 @@ def main() -> None:
     )
 
     columns = ("image_name", "patient_id", "actual", "probability", "reference_score", "decision")
-    rows = [(s.image_name, s.patient_id, s.label, f"{p:.6g}", f"{r:.3f}", d) for s, p, r, d in zip(samples, probabilities, reference_scores, decisions)]
+    rows = [(s.image_name, s.patient_id, s.label, float(p), float(r), d) for s, p, r, d in zip(samples, probabilities, reference_scores, decisions)]
     with (out_dir / "predictions.csv").open("w", newline="") as stream:
         for output in (stream, sys.stdout):
             csv.writer(output).writerows([columns, *rows])
