@@ -39,6 +39,7 @@ from .visualisation import plot_cases, plot_curves, plot_embeddings
 def batch_latency_ms(model: MelanomaModel, config: dict, device: torch.device) -> float:
     """Mean forward time of one preloaded batch (no image loading), after 3 warm-up passes."""
     batch = torch.randn(config["batch_size"], 3, config["image_size"], config["image_size"], device=device)
+    started = time.perf_counter()
     for repeat in range(13):
         if repeat == 3:
             getattr(torch, device.type).synchronize()  # torch.cuda / torch.mps / torch.cpu

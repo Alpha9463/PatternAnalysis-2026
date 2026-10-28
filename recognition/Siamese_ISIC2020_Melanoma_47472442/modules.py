@@ -4,6 +4,8 @@ Encoder: He et al., Deep Residual Learning, https://arxiv.org/abs/1512.03385
 Contrastive loss: Hadsell et al., CVPR 2006, https://doi.org/10.1109/CVPR.2006.100
 """
 
+from typing import cast
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -19,7 +21,7 @@ class MelanomaModel(nn.Module):
 
     def __init__(self, pretrained: bool = False) -> None:
         super().__init__()
-        self.encoder = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+        self.encoder = cast(nn.Module, resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None))
         self.encoder.fc = nn.Identity()
         self.classifier = nn.Linear(512, 2)
 

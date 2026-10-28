@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.figure import Figure
 from PIL import Image, ImageOps
 from sklearn.calibration import calibration_curve
 from sklearn.decomposition import PCA
@@ -19,7 +20,7 @@ FIGURES = Path(__file__).parent / "figures"
 COLOURS = {0: "#1f77b4", 1: "#c45c35"}  # benign, melanoma
 
 
-def _save(figure: plt.Figure, path: Path) -> None:
+def _save(figure: Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.tight_layout()
     figure.savefig(path, format="svg", bbox_inches="tight", metadata={"Date": None})

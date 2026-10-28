@@ -93,6 +93,7 @@ def main() -> None:
 
     history: list[dict[str, float]] = []
     best_auroc, peak_gpu = 0.0, 0.0
+    best_state, best_epoch = model.state_dict(), 0
     started = time.perf_counter()
     for epoch in range(1, config["epochs"] + 1):
         losses = train_epoch(model, train_loader, optimizer, scheduler, device, config)

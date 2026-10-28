@@ -9,7 +9,7 @@ import csv
 import json
 import random
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
 import torch
 from PIL import Image, ImageOps
@@ -96,7 +96,8 @@ class ISICDataset(Dataset):
                 transforms.RandomResizedCrop(image_size, scale=(0.35, 1.0)),
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomVerticalFlip(),
-                transforms.RandomRotation(45, fill=[round(255 * m) for m in MEAN]),
+                # RGB fills are supported; Torchvision infers only the scalar default's type.
+                transforms.RandomRotation(45, fill=cast(Any, [round(255 * m) for m in MEAN])),
                 transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02),
             ]
             if train
@@ -113,7 +114,7 @@ class ISICDataset(Dataset):
             # JPEG draft mode decodes straight to >= image_size: ~4x faster on 6000x4000 photos
             image.draft("RGB", (self.image_size, self.image_size))
             image = ImageOps.exif_transpose(image).convert("RGB")
-        return self.transform(image), sample.label
+        return cast(torch.Tensor, self.transform(image)), sample.label
 
 
 def melanoma_sampler(samples: list[Sample], melanoma_fraction: float, seed: int) -> WeightedRandomSampler:

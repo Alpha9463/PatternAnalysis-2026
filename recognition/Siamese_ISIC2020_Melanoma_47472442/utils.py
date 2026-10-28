@@ -4,6 +4,7 @@ import random
 import resource
 import sys
 from math import ceil
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -77,7 +78,11 @@ def specificity_threshold(labels: np.ndarray, scores: np.ndarray, specificity: f
 def threshold_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
     """Per-class precision/recall/F1, macro-F1, accuracy and confusion counts at one threshold."""
     predicted = (scores >= threshold).astype(int)
-    precision, recall, f1, _ = precision_recall_fscore_support(labels, predicted, labels=[0, 1], zero_division=0)
+    # average=None returns class-wise arrays; sklearn's annotations omit this case and numeric zero_division.
+    precision, recall, f1, _ = cast(
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        precision_recall_fscore_support(labels, predicted, labels=[0, 1], average=None, zero_division=cast(Any, 0)),
+    )
     (tn, fp), (fn, tp) = confusion_matrix(labels, predicted, labels=[0, 1])
     return {
         "threshold": threshold,
