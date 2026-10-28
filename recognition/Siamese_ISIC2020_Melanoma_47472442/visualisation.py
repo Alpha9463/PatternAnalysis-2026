@@ -50,7 +50,7 @@ def plot_architecture(path: Path) -> None:
     for start, end in (((0.19, 0.54), (0.26, 0.54)), ((0.46, 0.58), (0.57, 0.76)), ((0.46, 0.50), (0.58, 0.30))):
         axis.annotate("", xy=end, xytext=start, arrowprops={"arrowstyle": "->"})
     axis.text(0.88, 0.79, "Cross-entropy (training)\nPlatt-scaled melanoma\nprobability (decision)", ha="center", va="center", fontsize=10)
-    axis.text(0.88, 0.28, "Contrastive loss on all\nbatch pairs (Siamese only)\n+ nearest training references", ha="center", va="center", fontsize=10)
+    axis.text(0.88, 0.28, "Contrastive loss on all\nbatch pairs (Siamese only)\nReference score vs training\nimages (review triage)", ha="center", va="center", fontsize=10)
     axis.text(0.5, 0.03, "Every image in a batch passes through the same weights. Baseline contrastive weight = 0.", ha="center", fontsize=10)
     _save(figure, path)
 
