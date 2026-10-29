@@ -1,14 +1,18 @@
 """Reproduce report tables and selected SVGs without model inference.
 
 Main runs are baseline/siamese for seed 42 and <model>_seed<seed> for
-43, 44, 67 and 69. Saved CSV scores are rounded; stored decisions define
-binary negatives. Run this module to print Markdown table rows, use --json
-for named row groups, or pass --figures to also redraw selected SVGs.
+43, 44, 67 and 69; ablation runs are scratch and siamese_light_seed<seed>,
+and profile_<model> holds the one-epoch memory profile. Stored decisions
+define binary negatives. Run this module to print Markdown table rows, use
+--json for named row groups, or pass --figures to also redraw selected SVGs.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
 """
 
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -20,8 +24,16 @@ from .visualisation import plot_case_comparison, plot_curves
 
 MODELS = ("baseline", "siamese")
 SEEDS = (42, 43, 44, 67, 69)
+ABLATIONS = {  # report name: run directories
+    "Baseline, ImageNet start, λ = 0": [f"baseline_seed{s}" if s != 42 else "baseline" for s in (42, 43, 44)],
+    "Siamese, ImageNet start, λ = 0.5": [f"siamese_seed{s}" if s != 42 else "siamese" for s in (42, 43, 44)],
+    "Light Siamese, ImageNet start, λ = 0.25": [f"siamese_light_seed{s}" for s in (42, 43, 44)],
+    "Baseline, random start, λ = 0, 15 epochs": ["scratch"],
+}
 HEADERS = {
     "benchmark_rows": "Final measure|Baseline|Siamese",
+    "embedding_rows": "Final embedding pairs|Baseline|Siamese",
+    "ablation_rows": "Final model|Seeds|AUROC|Melanoma AP|Accuracy|Melanoma recall|Workload (%)|Capture (%)",
     "confusion_rows": "Seed-42 model|TN|FP|FN|TP",
     "uncertainty_rows": "Error-ranking AUROC|Baseline|Siamese",
     "review_comparison_rows": "Calibration workload (%)|Probability-only review|Reference-only review",
@@ -57,7 +69,7 @@ def mean_sd(values: list[float], digits: int = 3, scale: float = 1) -> str:
     Parameters
     ----------
     values : list of float
-        Measurements from at least two trained seeds.
+        Measurements from trained seeds. A single value is shown alone.
     digits : int, optional
         Decimal places for both values. Default is 3.
     scale : float, optional
@@ -70,7 +82,41 @@ def mean_sd(values: list[float], digits: int = 3, scale: float = 1) -> str:
         Formatted mean and sample standard deviation separated by ±.
     """
     array = np.asarray(values) * scale
+    if len(array) == 1:
+        return f"{array[0]:.{digits}f}"
     return f"{array.mean():.{digits}f} ± {array.std(ddof=1):.{digits}f}"
+
+
+def table_row(cells: list[str]) -> str:
+    """Join cells into one Markdown table row.
+
+    Parameters
+    ----------
+    cells : list of str
+        Cell text in column order.
+
+    Returns
+    -------
+    str
+        Pipe-delimited Markdown row.
+    """
+    return "| " + " | ".join(cells) + " |"
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    """Read one saved JSON metrics file.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        JSON file written by training or prediction.
+
+    Returns
+    -------
+    dict
+        Parsed metrics.
+    """
+    return json.loads(path.read_text())
 
 
 def report_tables(runs: Path) -> dict[str, str]:
@@ -84,8 +130,7 @@ def report_tables(runs: Path) -> dict[str, str]:
     Returns
     -------
     dict of str to str
-        Named Markdown table rows. Metrics use full-precision summaries;
-        negative-subgroup AUROCs use the available rounded CSV scores.
+        Named Markdown table rows from full-precision saved results.
 
     Notes
     -----
@@ -93,9 +138,12 @@ def report_tables(runs: Path) -> dict[str, str]:
     patient identifiers and labels in the same order. Computational cost
     and confusion counts describe seed 42; aggregate rows use five seeds.
     """
-    final = {m: [json.loads((run_path(runs, m, s) / "final/metrics.json").read_text()) for s in SEEDS] for m in MODELS}
-    calibration = {m: [json.loads((run_path(runs, m, s) / "calibration/metrics.json").read_text()) for s in SEEDS] for m in MODELS}
-    training = {m: json.loads((run_path(runs, m, 42) / "metrics.json").read_text()) for m in MODELS}
+    final, calibration = {}, {}
+    for m in MODELS:
+        final[m] = [read_json(run_path(runs, m, s) / "final/metrics.json") for s in SEEDS]
+        calibration[m] = [read_json(run_path(runs, m, s) / "calibration/metrics.json") for s in SEEDS]
+    training = {m: read_json(run_path(runs, m, 42) / "metrics.json") for m in MODELS}
+    profile = {m: read_json(runs / f"profile_{m}" / "metrics.json") for m in MODELS}
     tables: dict[str, str] = {}
     rows = []
     for name, parent, key in (
@@ -119,21 +167,64 @@ def report_tables(runs: Path) -> dict[str, str]:
             values = []
             for report in final[model]:
                 d = report["decision"]
-                values.append(2 * d["tn"] / (2 * d["tn"] + d["fp"] + d["fn"]) if key == "benign_f1" else report[parent][key])
-            cells.append(mean_sd(values, 1 if parent == "triage" else 4 if key == "brier" else 3, 100 if parent == "triage" else 1))
-        rows.append("| " + " | ".join([name, *cells]) + " |")
+                benign_f1 = 2 * d["tn"] / (2 * d["tn"] + d["fp"] + d["fn"])
+                values.append(benign_f1 if key == "benign_f1" else report[parent][key])
+            if parent == "triage":
+                cells.append(mean_sd(values, 1, 100))  # percentages
+            else:
+                cells.append(mean_sd(values, 4 if key == "brier" else 3))
+        rows.append(table_row([name, *cells]))
     tables["benchmark_rows"] = "\n".join(rows)
-    tables["confusion_rows"] = "\n".join("| " + " | ".join([m.capitalize(), *[str(final[m][0]["decision"][k]) for k in ("tn", "fp", "fn", "tp")]]) + " |" for m in MODELS)
+    rows = []
+    for name, key in (
+        ("Mean distance, benign–benign", "benign_benign"),
+        ("Mean distance, melanoma–benign", "mixed"),
+        ("Mean distance, melanoma–melanoma", "melanoma_melanoma"),
+        ("Melanoma pair AUROC (same class closer)", "melanoma_pair_auroc"),
+    ):
+        cells = []
+        for m in MODELS:
+            cells.append(mean_sd([r["embedding_pairs"][key] for r in final[m]]))
+        rows.append(table_row([name, *cells]))
+    tables["embedding_rows"] = "\n".join(rows)
+    rows = []
+    for name, run_names in ABLATIONS.items():
+        reports = [read_json(runs / n / "final/metrics.json") for n in run_names]
+        cells = []
+        for parent, key, digits, scale in (
+            ("classifier", "auroc", 3, 1), ("classifier", "average_precision", 3, 1),
+            ("decision", "accuracy", 3, 1), ("decision", "melanoma_recall", 3, 1),
+            ("triage", "workload", 1, 100), ("triage", "melanoma_capture", 1, 100),
+        ):
+            cells.append(mean_sd([r[parent][key] for r in reports], digits, scale))
+        rows.append(table_row([name, str(len(run_names)), *cells]))
+    tables["ablation_rows"] = "\n".join(rows)
+    rows = []
+    for m in MODELS:
+        counts = [str(final[m][0]["decision"][k]) for k in ("tn", "fp", "fn", "tp")]
+        rows.append(table_row([m.capitalize(), *counts]))
+    tables["confusion_rows"] = "\n".join(rows)
 
-    predictions = {m: [read_predictions(run_path(runs, m, s) / "final/predictions.csv") for s in SEEDS] for m in MODELS}
+    predictions = {}
+    for m in MODELS:
+        predictions[m] = [read_predictions(run_path(runs, m, s) / "final/predictions.csv") for s in SEEDS]
     identity = predictions["baseline"][0]
     for group in predictions.values():
         for prediction in group:
             assert all(np.array_equal(prediction[k], identity[k]) for k in ("image_name", "patient_id", "label"))
     rows = []
-    for name, key in (("All binary errors: classifier uncertainty", "confidence"), ("All binary errors: reference disagreement", "reference_disagreement")):
-        rows.append("| " + " | ".join([name, *[mean_sd([r["error_detection_auroc"][key] for r in final[m]]) for m in MODELS]]) + " |")
-    for name, key in (("Missed melanomas among binary negatives: reference score", "reference_score"), ("Missed melanomas among binary negatives: probability", "probability")):
+    for name, key in (
+        ("All binary errors: classifier uncertainty", "confidence"),
+        ("All binary errors: reference disagreement", "reference_disagreement"),
+    ):
+        cells = []
+        for m in MODELS:
+            cells.append(mean_sd([r["error_detection_auroc"][key] for r in final[m]]))
+        rows.append(table_row([name, *cells]))
+    for name, key in (
+        ("Missed melanomas among binary negatives: reference score", "reference_score"),
+        ("Missed melanomas among binary negatives: probability", "probability"),
+    ):
         cells = []
         for model in MODELS:
             values = []
@@ -141,9 +232,15 @@ def report_tables(runs: Path) -> dict[str, str]:
                 negative = p["decision"] != "melanoma"
                 values.append(float(roc_auc_score(p["label"][negative], p[key][negative])))
             cells.append(mean_sd(values))
-        rows.append("| " + " | ".join([name, *cells]) + " |")
+        rows.append(table_row([name, *cells]))
     tables["uncertainty_rows"] = "\n".join(rows)
-    tables["review_comparison_rows"] = "\n".join("| " + " | ".join([m.capitalize(), *[mean_sd([r[p]["flagged_fraction"] for r in calibration[m]], 1, 100) for p in ("classifier_review", "reference_review")]]) + " |" for m in MODELS)
+    rows = []
+    for m in MODELS:
+        cells = []
+        for policy in ("classifier_review", "reference_review"):
+            cells.append(mean_sd([r[policy]["flagged_fraction"] for r in calibration[m]], 1, 100))
+        rows.append(table_row([m.capitalize(), *cells]))
+    tables["review_comparison_rows"] = "\n".join(rows)
     rows = []
     for model in MODELS:
         for name, parent, workload, capture in (
@@ -152,21 +249,27 @@ def report_tables(runs: Path) -> dict[str, str]:
             ("Reference-only review", "reference_review", "flagged_fraction", "melanoma_recall"),
             ("Classifier flags + reference review", "triage", "workload", "melanoma_capture"),
         ):
-            rows.append("| " + " | ".join([model.capitalize(), name, mean_sd([r[parent][workload] for r in final[model]], 1, 100), mean_sd([r[parent][capture] for r in final[model]], 1, 100)]) + " |")
+            rows.append(table_row([
+                model.capitalize(), name,
+                mean_sd([r[parent][workload] for r in final[model]], 1, 100),
+                mean_sd([r[parent][capture] for r in final[model]], 1, 100),
+            ]))
     tables["final_policy_rows"] = "\n".join(rows)
 
     rows = []
+    scoring = {m: final[m][0] for m in MODELS}
     for name, source, key, scale, digits in (
         ("Parameters", training, "parameters", 1, 0),
         ("Training, minutes", training, "training_hours", 60, 1),
-        ("Maximum sampled MPS driver allocation, training (GiB)", training, "peak_gpu_memory_gib", 1, 2),
-        ("MPS driver allocation after inference benchmark (GiB)", {m: final[m][0] for m in MODELS}, "peak_gpu_memory_gib", 1, 2),
+        ("Peak MPS driver allocation, training (GiB)", profile, "peak_gpu_memory_gib", 1, 2),
+        ("MPS driver allocation after inference benchmark (GiB)", scoring, "peak_gpu_memory_gib", 1, 2),
         ("Peak main-process RSS during training (GiB)", training, "peak_process_memory_gib", 1, 2),
-        ("Forward latency, 32-image batch (ms)", {m: final[m][0] for m in MODELS}, "batch_latency_ms", 1, 1),
-        ("Image-scoring throughput (images/s)", {m: final[m][0] for m in MODELS}, "images_per_second_end_to_end", 1, 1),
+        ("Forward latency, 32-image batch (ms)", scoring, "batch_latency_ms", 1, 1),
+        ("Image-scoring throughput (images/s)", scoring, "images_per_second_end_to_end", 1, 1),
     ):
-        cells = [f"{source[m]['profile'][key]:,}" if name == "Parameters" else f"{source[m]['profile'][key] * scale:.{digits}f}" for m in MODELS]
-        rows.append("| " + " | ".join([name, *cells]) + " |")
+        values = [source[m]["profile"][key] for m in MODELS]
+        cells = [f"{v:,}" if name == "Parameters" else f"{v * scale:.{digits}f}" for v in values]
+        rows.append(table_row([name, *cells]))
     tables["resource_rows"] = "\n".join(rows)
     return tables
 
@@ -192,7 +295,10 @@ def redraw_figures(runs: Path, output: Path) -> None:
     training = {m: json.loads((runs / m / "metrics.json").read_text()) for m in MODELS}
     for model in MODELS:
         p = predictions[model]
-        plot_curves(p["label"], p["probability"], p["reference_score"], training[model]["rule"], output / f"final_curves_{model}.svg", f"{model.capitalize()} · seed 42 · final · rounded saved scores")
+        plot_curves(
+            p["label"], p["probability"], p["reference_score"], training[model]["rule"],
+            output / f"final_curves_{model}.svg", f"{model.capitalize()} · seed 42 · final",
+        )
     baseline = predictions["baseline"]
     order = np.argsort(baseline["probability"])
     missed_by_both = [
@@ -208,7 +314,9 @@ def redraw_figures(runs: Path, output: Path) -> None:
     config = yaml.safe_load((Path(__file__).parent / "configs/baseline.yaml").read_text())
     for number, indices in enumerate((chosen[:2], chosen[2:4], chosen[4:]), 1):
         cases = [samples[str(baseline["image_name"][i])] for i in indices]
-        values = {m: {k: a[indices] for k, a in p.items()} for m, p in predictions.items()}
+        values = {}
+        for model, prediction in predictions.items():
+            values[model] = {key: array[indices] for key, array in prediction.items()}
         plot_case_comparison(cases, values, config["image_size"], output / f"final_cases_comparison_{number}.svg")
 
 

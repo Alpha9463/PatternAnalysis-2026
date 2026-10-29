@@ -4,6 +4,8 @@ Encoder: He et al., Deep Residual Learning,
 https://arxiv.org/abs/1512.03385.
 Contrastive loss: Hadsell et al., CVPR 2006,
 https://doi.org/10.1109/CVPR.2006.100.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
 """
 
 from typing import cast
@@ -117,5 +119,8 @@ def nearest_references(
         0.5 means equal mean distances. This score is not a probability.
     """
     distances = torch.cdist(queries, references)
-    benign, melanoma = (distances[:, reference_labels == label].topk(neighbours, largest=False).values.mean(dim=1) for label in (0, 1))
+    benign, melanoma = (
+        distances[:, reference_labels == label].topk(neighbours, largest=False).values.mean(dim=1)
+        for label in (0, 1)
+    )
     return distances.argmin(dim=1), benign / (benign + melanoma)

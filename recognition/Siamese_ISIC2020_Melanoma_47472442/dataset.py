@@ -3,6 +3,8 @@
 Images and ``ISIC_2020_Training_GroundTruth_v2.csv`` live under repository
 ``data/``. Run this module to write the fixed patient split and print the
 image, patient and melanoma counts for each role.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
 """
 
 import csv
@@ -89,7 +91,7 @@ def _split_patients(labels: dict[str, int], fractions: tuple[float, ...], seed: 
         patients = sorted(patient for patient, target in labels.items() if target == label)
         rng.shuffle(patients)
         start = 0
-        for group, fraction in zip(groups, fractions):
+        for group, fraction in zip(groups, fractions, strict=False):  # the last group takes the remainder
             count = round(len(patients) * fraction)
             group.extend(patients[start : start + count])
             start += count
@@ -140,7 +142,8 @@ def load_splits(samples: list[Sample], split_file: Path = SPLIT_FILE) -> dict[st
     dict of str to list of Sample
         Image records for train, selection, calibration and final roles.
         Training combines the saved fit and development groups. Image order
-        within each role follows the input records.
+        within each role follows the input records. An assertion stops the
+        run if any patient appears in more than one role.
     """
     partitions = json.loads(split_file.read_text())["partitions"]
     roles = {
@@ -149,10 +152,11 @@ def load_splits(samples: list[Sample], split_file: Path = SPLIT_FILE) -> dict[st
         "calibration": set(partitions["calibration"]),
         "final": set(partitions["final"]),
     }
+    assert sum(map(len, roles.values())) == len(set().union(*roles.values())), "patient groups overlap"
     return {role: [s for s in samples if s.patient_id in patients] for role, patients in roles.items()}
 
 
-class ISICDataset(Dataset):
+class ISICDataset(Dataset[tuple[torch.Tensor, int]]):
     """Load RGB lesion images as normalised square tensors.
 
     Parameters
@@ -240,7 +244,8 @@ def melanoma_sampler(samples: list[Sample], melanoma_fraction: float, seed: int)
         Individual batches and epochs can differ from the target fraction.
     """
     melanomas = sum(s.label for s in samples)
-    weights = [melanoma_fraction / melanomas if s.label else (1 - melanoma_fraction) / (len(samples) - melanomas) for s in samples]
+    benign_weight = (1 - melanoma_fraction) / (len(samples) - melanomas)
+    weights = [melanoma_fraction / melanomas if s.label else benign_weight for s in samples]
     return WeightedRandomSampler(weights, len(samples), generator=torch.Generator().manual_seed(seed))
 
 
@@ -248,4 +253,5 @@ if __name__ == "__main__":
     all_samples = read_samples()
     create_splits(all_samples)
     for role, group in load_splits(all_samples).items():
-        print(f"{role}: {len(group)} images, {len({s.patient_id for s in group})} patients, {sum(s.label for s in group)} melanomas")
+        patients = len({s.patient_id for s in group})
+        print(f"{role}: {len(group)} images, {patients} patients, {sum(s.label for s in group)} melanomas")

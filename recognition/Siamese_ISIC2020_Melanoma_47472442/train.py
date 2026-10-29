@@ -4,6 +4,8 @@ Selection patients choose the epoch. Calibration patients fit probability
 scaling and thresholds. Final patients are never loaded here; the
 prediction module scores them with the saved checkpoint. The command
 accepts a YAML configuration path and optional run name and training seed.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
 """
 
 import argparse
@@ -12,12 +14,14 @@ import json
 import random
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import yaml
 from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
 from torch.nn import functional as F
+from torch.utils.data import DataLoader
 
 from .dataset import DATA_DIR, Sample, load_splits, melanoma_sampler, read_samples
 from .modules import MelanomaModel, contrastive_loss, nearest_references
@@ -37,7 +41,14 @@ from .utils import (
 from .visualisation import plot_training_history
 
 
-def train_epoch(model, loader, optimizer, scheduler, device, config) -> dict[str, float]:
+def train_epoch(
+    model: MelanomaModel,
+    loader: DataLoader[tuple[torch.Tensor, int]],
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    device: torch.device,
+    config: dict[str, Any],
+) -> tuple[dict[str, float], float]:
     """Train one epoch with classification and weighted contrastive loss.
 
     Parameters
@@ -58,12 +69,14 @@ def train_epoch(model, loader, optimizer, scheduler, device, config) -> dict[str
 
     Returns
     -------
-    dict of str to float
+    losses : dict of str to float
         Mean batch losses under train_cross_entropy and train_contrastive.
         The contrastive value is reported before weighting.
+    peak_memory : float
+        Largest accelerator memory reading in GiB, polled after every step.
     """
     model.train()
-    totals = np.zeros(2)
+    totals, peak_memory = np.zeros(2), 0.0
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         with torch.autocast(device.type, dtype=torch.bfloat16):
@@ -76,8 +89,9 @@ def train_epoch(model, loader, optimizer, scheduler, device, config) -> dict[str
         optimizer.step()
         scheduler.step()
         totals += (cross_entropy.item(), contrastive.item())
+        peak_memory = max(peak_memory, accelerator_memory_gib(device))
     cross_entropy, contrastive = totals / len(loader)
-    return {"train_cross_entropy": cross_entropy, "train_contrastive": contrastive}
+    return {"train_cross_entropy": cross_entropy, "train_contrastive": contrastive}, peak_memory
 
 
 def reference_gallery(train: list[Sample], seed: int) -> list[Sample]:
@@ -125,7 +139,9 @@ def main() -> None:
     train_loader = image_loader(splits["train"], config, train=True, sampler=sampler)
     selection_loader = image_loader(splits["selection"], config)
     model = MelanomaModel(pretrained=config["pretrained"]).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), config["learning_rate"], weight_decay=config["weight_decay"])
+    optimizer = torch.optim.AdamW(
+        model.parameters(), config["learning_rate"], weight_decay=config["weight_decay"]
+    )
     # Linear warm-up for the first 10% of steps, then cosine decay
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, config["learning_rate"], total_steps=config["epochs"] * len(train_loader), pct_start=0.1
@@ -136,8 +152,8 @@ def main() -> None:
     best_state, best_epoch = model.state_dict(), 0
     started = time.perf_counter()
     for epoch in range(1, config["epochs"] + 1):
-        losses = train_epoch(model, train_loader, optimizer, scheduler, device, config)
-        peak_gpu = max(peak_gpu, accelerator_memory_gib(device))
+        losses, epoch_peak = train_epoch(model, train_loader, optimizer, scheduler, device, config)
+        peak_gpu = max(peak_gpu, epoch_peak)
         margins, _, labels = score_images(model, selection_loader, device)
         history.append({
             "epoch": epoch,
@@ -164,11 +180,14 @@ def main() -> None:
     _, reference_scores = nearest_references(
         embeddings, gallery_embeddings, torch.from_numpy(gallery_labels), config["neighbours"]
     )
+    decision_threshold = specificity_threshold(labels, probabilities, config["target_specificity"])
+    review_threshold = recall_threshold(labels, probabilities, config["review_recall"])
+    reference_review_threshold = recall_threshold(labels, reference_scores.numpy(), config["review_recall"])
     rule = {
         "platt": platt,
-        "decision_threshold": specificity_threshold(labels, probabilities, config["target_specificity"]),
-        "review_threshold": recall_threshold(labels, probabilities, config["review_recall"]),
-        "reference_review_threshold": recall_threshold(labels, reference_scores.numpy(), config["review_recall"]),
+        "decision_threshold": decision_threshold,
+        "review_threshold": review_threshold,
+        "reference_review_threshold": reference_review_threshold,
     }
     torch.save({
         "config": config,
@@ -185,9 +204,9 @@ def main() -> None:
         "calibration": {
             "auroc": float(roc_auc_score(labels, probabilities)),
             "average_precision": float(average_precision_score(labels, probabilities)),
-            "decision": threshold_metrics(labels, probabilities, rule["decision_threshold"]),
-            "reference_review": threshold_metrics(labels, reference_scores.numpy(), rule["reference_review_threshold"]),
-            "classifier_review": threshold_metrics(labels, probabilities, rule["review_threshold"]),
+            "decision": threshold_metrics(labels, probabilities, decision_threshold),
+            "reference_review": threshold_metrics(labels, reference_scores.numpy(), reference_review_threshold),
+            "classifier_review": threshold_metrics(labels, probabilities, review_threshold),
         },
         "profile": {
             "parameters": sum(p.numel() for p in model.parameters()),

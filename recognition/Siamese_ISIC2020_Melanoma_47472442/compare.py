@@ -7,6 +7,8 @@ melanoma presence, and scores both models on that draw. Print estimates and
 
 Patient resampling follows Field and Welsh (2007),
 https://doi.org/10.1111/j.1467-9868.2007.00593.x.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
 """
 
 import argparse
@@ -77,7 +79,27 @@ def summarise(run: dict[str, np.ndarray], index: np.ndarray) -> np.ndarray:
     ])
 
 
-NAMES = ("AUROC", "Melanoma AP", "Decision recall", "Decision precision", "Decision accuracy", "Review workload", "Review capture")
+def interval(values: np.ndarray) -> str:
+    """Format the central 95% percentile interval of bootstrap values.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Bootstrap estimates. NaN values are ignored.
+
+    Returns
+    -------
+    str
+        Lower and upper bounds in brackets, rounded to four decimals.
+    """
+    low, high = np.nanpercentile(values, [2.5, 97.5])
+    return f"[{low:.4f}, {high:.4f}]"
+
+
+NAMES = (
+    "AUROC", "Melanoma AP", "Decision recall", "Decision precision", "Decision accuracy",
+    "Review workload", "Review capture",
+)
 
 
 def main() -> None:
@@ -98,7 +120,9 @@ def main() -> None:
     for i, patient in enumerate(baseline["patient_id"]):
         images_by_patient[patient].append(i)
     has_melanoma = {p: baseline["label"][i].any() for p, i in images_by_patient.items()}
-    strata = [np.array([p for p in images_by_patient if has_melanoma[p] == flag]) for flag in (True, False)]
+    melanoma_patients = [p for p in images_by_patient if has_melanoma[p]]
+    benign_patients = [p for p in images_by_patient if not has_melanoma[p]]
+    strata = [np.array(melanoma_patients), np.array(benign_patients)]
 
     rng = np.random.default_rng(42)
     draws = []
@@ -110,29 +134,12 @@ def main() -> None:
     everyone = np.arange(len(baseline["label"]))
     estimates = np.stack([summarise(baseline, everyone), summarise(siamese, everyone)])
 
-    def interval(values: np.ndarray) -> str:
-        """Format the central 95% percentile interval of bootstrap values.
-
-        Parameters
-        ----------
-        values : numpy.ndarray
-            Bootstrap estimates. NaN values are ignored.
-
-        Returns
-        -------
-        str
-            Lower and upper bounds in brackets, rounded to four decimals.
-        """
-        low, high = np.nanpercentile(values, [2.5, 97.5])
-        return f"[{low:.4f}, {high:.4f}]"
-
     print("| Measure | Baseline | Siamese | Siamese - baseline |")
     print("| --- | ---: | ---: | ---: |")
     for m, name in enumerate(NAMES):
-        print(
-            f"| {name} | {estimates[0, m]:.4f} {interval(draws[:, 0, m])} | {estimates[1, m]:.4f} {interval(draws[:, 1, m])} "
-            f"| {estimates[1, m] - estimates[0, m]:+.4f} {interval(draws[:, 1, m] - draws[:, 0, m])} |"
-        )
+        cells = [f"{estimates[k, m]:.4f} {interval(draws[:, k, m])}" for k in (0, 1)]
+        difference = f"{estimates[1, m] - estimates[0, m]:+.4f} {interval(draws[:, 1, m] - draws[:, 0, m])}"
+        print(f"| {name} | {cells[0]} | {cells[1]} | {difference} |")
 
 
 if __name__ == "__main__":

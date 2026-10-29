@@ -1,4 +1,7 @@
-"""Share helpers for devices, scoring, calibration and metrics."""
+"""Share helpers for devices, scoring, calibration and metrics.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
+"""
 
 import random
 import resource
@@ -9,8 +12,12 @@ from typing import Any, cast
 import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
-from torch.utils.data import DataLoader
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
+from torch.utils.data import DataLoader, Sampler
 
 from .dataset import ISICDataset, Sample
 from .modules import MelanomaModel
@@ -42,7 +49,9 @@ def select_device() -> torch.device:
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
-def image_loader(samples: list[Sample], config: dict, train: bool = False, sampler=None) -> DataLoader:
+def image_loader(
+    samples: list[Sample], config: dict[str, Any], train: bool = False, sampler: Sampler[int] | None = None
+) -> DataLoader[tuple[torch.Tensor, int]]:
     """Build an image loader with workers that persist across epochs.
 
     Parameters
@@ -64,11 +73,15 @@ def image_loader(samples: list[Sample], config: dict, train: bool = False, sampl
         Batches of normalised RGB image tensors and integer class labels.
     """
     dataset = ISICDataset(samples, config["image_size"], train)
-    return DataLoader(dataset, config["batch_size"], sampler=sampler, num_workers=config["workers"], persistent_workers=True)
+    return DataLoader(
+        dataset, config["batch_size"], sampler=sampler, num_workers=config["workers"], persistent_workers=True
+    )
 
 
 @torch.no_grad()
-def score_images(model: MelanomaModel, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, torch.Tensor, np.ndarray]:
+def score_images(
+    model: MelanomaModel, loader: DataLoader[tuple[torch.Tensor, int]], device: torch.device
+) -> tuple[np.ndarray, torch.Tensor, np.ndarray]:
     """Score images without gradients and return results in loader order.
 
     Parameters
@@ -245,7 +258,8 @@ def accelerator_memory_gib(device: torch.device) -> float:
     -------
     float
         Peak reserved CUDA memory, current MPS driver allocation or zero
-        for CPU. The MPS value is a snapshot rather than a measured peak.
+        for CPU. MPS has no peak counter, so training polls this value after
+        every optimiser step and keeps the maximum.
     """
     if device.type == "cuda":
         return torch.cuda.max_memory_reserved() / 2**30

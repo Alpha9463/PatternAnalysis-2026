@@ -3,9 +3,12 @@
 Plotting functions create parent directories and replace existing SVGs.
 Run this module to redraw the architecture figure in the package's figures
 directory. No model training or inference is performed here.
+
+Author: Alex Anderson (47472442), COMP3710 Pattern Recognition, 2026.
 """
 
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -15,9 +18,14 @@ import numpy as np
 from matplotlib.figure import Figure
 from PIL import Image, ImageOps
 from sklearn.decomposition import PCA
-from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, roc_curve
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
-from .dataset import ISICDataset, MEAN, STD, Sample
+from .dataset import MEAN, STD, ISICDataset, Sample
 
 FIGURES = Path(__file__).parent / "figures"
 COLOURS = {0: "#1f77b4", 1: "#c45c35"}  # benign, melanoma
@@ -102,7 +110,7 @@ def plot_architecture(path: Path) -> None:
             "patchA": labels[start].get_bbox_patch(), "patchB": labels[end].get_bbox_patch(),
             "shrinkA": 5, "shrinkB": 5,
         })
-    feedback = {"color": "#2b7050", "linestyle": "--", "linewidth": 1.2}
+    feedback: dict[str, Any] = {"color": "#2b7050", "linestyle": "--", "linewidth": 1.2}
     axis.annotate("", xy=(0.95, 1.25), xytext=nodes["total"][:2], arrowprops={
         **feedback, "arrowstyle": "-", "patchA": labels["total"].get_bbox_patch(), "shrinkA": 5, "shrinkB": 0,
     })
@@ -111,7 +119,10 @@ def plot_architecture(path: Path) -> None:
         axis.annotate("", xy=nodes[name][:2], xytext=(nodes[name][0], 1.25), arrowprops={
             **feedback, "arrowstyle": "->", "patchB": labels[name].get_bbox_patch(), "shrinkA": 0, "shrinkB": 5,
         })
-    axis.text(0.61, 1.53, "Backpropagation + AdamW weight updates\nEncoder: total loss · classifier: cross-entropy only", ha="center", va="center", fontsize=13, color="#2b7050")
+    axis.text(
+        0.61, 1.53, "Backpropagation + AdamW weight updates\nEncoder: total loss · classifier: cross-entropy only",
+        ha="center", va="center", fontsize=13, color="#2b7050",
+    )
     _save(figure, path)
 
 
@@ -145,7 +156,9 @@ def plot_training_history(history: list[dict[str, float]], path: Path) -> None:
     _save(figure, path)
 
 
-def reliability_bins(labels: np.ndarray, probabilities: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def reliability_bins(
+    labels: np.ndarray, probabilities: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Summarise eight quantile bins, retaining bins with zero melanomas.
 
     Parameters
@@ -177,10 +190,18 @@ def reliability_bins(labels: np.ndarray, probabilities: np.ndarray) -> tuple[np.
     positives = np.bincount(bins, weights=labels, minlength=8)
     totals = np.bincount(bins, weights=probabilities, minlength=8)
     occupied = counts > 0
-    return totals[occupied] / counts[occupied], positives[occupied] / counts[occupied], positives[occupied].astype(int), counts[occupied]
+    predicted, observed = totals[occupied] / counts[occupied], positives[occupied] / counts[occupied]
+    return predicted, observed, positives[occupied].astype(int), counts[occupied]
 
 
-def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores: np.ndarray, rule: dict, path: Path, title: str) -> None:
+def plot_curves(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    reference_scores: np.ndarray,
+    rule: dict[str, Any],
+    path: Path,
+    title: str,
+) -> None:
     """Save ROC, precision-recall and probability reliability plots.
 
     Parameters
@@ -206,9 +227,12 @@ def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores:
     for scores, name, colour in ((probabilities, "Classifier", "#087e83"), (reference_scores, "References", "#9467bd")):
         fpr, tpr, _ = roc_curve(labels, scores)
         precision, recall, _ = precision_recall_curve(labels, scores)
-        roc.plot(fpr, tpr, color=colour, linewidth=2, label=f"{name} AUC {roc_auc_score(labels, scores):.3f}")
-        pr.plot(recall, precision, color=colour, linewidth=2, label=f"{name} AP {average_precision_score(labels, scores):.3f}")
-    for scores, key, marker in ((probabilities, "decision_threshold", "o"), (reference_scores, "reference_review_threshold", "s")):
+        auroc, ap = roc_auc_score(labels, scores), average_precision_score(labels, scores)
+        roc.plot(fpr, tpr, color=colour, linewidth=2, label=f"{name} AUC {auroc:.3f}")
+        pr.plot(recall, precision, color=colour, linewidth=2, label=f"{name} AP {ap:.3f}")
+    for scores, key, marker in (
+        (probabilities, "decision_threshold", "o"), (reference_scores, "reference_review_threshold", "s")
+    ):
         flagged = scores >= rule[key]
         recall = flagged[labels == 1].mean()
         cutoff = "Binary cutoff" if key == "decision_threshold" else "Review cutoff"
@@ -221,7 +245,9 @@ def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores:
     bins_axis.axis("off")
     bins_axis.set_title("Reliability bins (8)", fontsize=18)
     counts_table = bins_axis.table(
-        cellText=[[f"{p:.4g}", f"{positive}/{count}"] for p, positive, count in zip(predicted, positives, counts)],
+        cellText=[
+            [f"{p:.4g}", f"{positive}/{count}"] for p, positive, count in zip(predicted, positives, counts, strict=True)
+        ],
         colLabels=["Mean p", "Mel./n"], bbox=(0, 0.08, 1, 0.84),
     )
     counts_table.auto_set_font_size(False)
@@ -236,8 +262,10 @@ def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores:
     reliability.set(xscale="log", xlim=(1e-4, 1), ylim=(-0.01, max(0.15, float(observed.max()) * 1.25)))
     roc.set(title="ROC", xlabel="Benign false-positive rate", ylabel="Melanoma recall")
     pr.set(title="Precision-recall", xlabel="Melanoma recall", ylabel="Melanoma precision", ylim=(0, 1))
-    reliability.set(title="Reliability", xlabel="Mean predicted probability\n(log scale)", ylabel="Observed melanoma rate")
-    for axis, legend_axis in zip((roc, pr, reliability), axes[1]):
+    reliability.set(
+        title="Reliability", xlabel="Mean predicted probability\n(log scale)", ylabel="Observed melanoma rate"
+    )
+    for axis, legend_axis in zip((roc, pr, reliability), axes[1], strict=False):  # fourth axis holds the table
         axis.grid(alpha=0.2)
         axis.set_axisbelow(True)
         axis.spines[["top", "right"]].set_visible(False)
@@ -245,12 +273,16 @@ def plot_curves(labels: np.ndarray, probabilities: np.ndarray, reference_scores:
         axis.xaxis.label.set_size(16)
         axis.yaxis.label.set_size(16)
         axis.title.set_size(18)
-        legend_axis.legend(*axis.get_legend_handles_labels(), loc="upper left", borderaxespad=0, fontsize=14, frameon=False)
+        handles, names = axis.get_legend_handles_labels()
+        legend_axis.legend(handles, names, loc="upper left", borderaxespad=0, fontsize=14, frameon=False)
     figure.suptitle(f"{title} · {len(labels):,} images / {labels.sum()} melanomas", fontsize=18)
     _save(figure, path)
 
 
-def plot_embeddings(gallery: np.ndarray, gallery_labels: np.ndarray, queries: np.ndarray, query_labels: np.ndarray, path: Path, partition: str) -> None:
+def plot_embeddings(
+    gallery: np.ndarray, gallery_labels: np.ndarray, queries: np.ndarray, query_labels: np.ndarray,
+    path: Path, partition: str,
+) -> None:
     """Save a two-dimensional PCA view of references and query embeddings.
 
     Parameters
@@ -272,15 +304,51 @@ def plot_embeddings(gallery: np.ndarray, gallery_labels: np.ndarray, queries: np
     references, projected = pca.transform(gallery), pca.transform(queries)
     figure, axis = plt.subplots(figsize=(8, 6))
     for label, name in ((0, "benign"), (1, "melanoma")):
-        axis.scatter(*references[gallery_labels == label].T, s=30, facecolors="none", edgecolors=COLOURS[label], alpha=0.6, label=f"Training references · {name}")
-        axis.scatter(*projected[query_labels == label].T, s=14 + 30 * label, marker="x", color=COLOURS[label], alpha=0.35 + 0.5 * label, label=f"{partition} · {name}")
+        axis.scatter(
+            *references[gallery_labels == label].T, s=30, facecolors="none", edgecolors=COLOURS[label],
+            alpha=0.6, label=f"Training references · {name}",
+        )
+        axis.scatter(
+            *projected[query_labels == label].T, s=14 + 30 * label, marker="x", color=COLOURS[label],
+            alpha=0.35 + 0.5 * label, label=f"{partition} · {name}",
+        )
     variance = pca.explained_variance_ratio_
-    axis.set(title=f"Embeddings · {partition}", xlabel=f"PC1 ({variance[0]:.0%} of reference variance)", ylabel=f"PC2 ({variance[1]:.0%})")
+    axis.set(
+        title=f"Embeddings · {partition}",
+        xlabel=f"PC1 ({variance[0]:.0%} of reference variance)", ylabel=f"PC2 ({variance[1]:.0%})",
+    )
     axis.legend(fontsize=8)
     _save(figure, path)
 
 
-def plot_cases(cases: list[dict], path: Path) -> None:
+def plot_pair_distances(distances: np.ndarray, pair_types: np.ndarray, path: Path, title: str) -> None:
+    """Save embedding-distance histograms for each kind of image pair.
+
+    Parameters
+    ----------
+    distances : numpy.ndarray of shape (pairs,)
+        Euclidean distances between unit-length embeddings, from 0 to 2.
+    pair_types : numpy.ndarray of shape (pairs,)
+        Melanomas in each pair: 0 benign-benign, 1 mixed, 2 melanoma-melanoma.
+    path : pathlib.Path
+        Destination SVG file.
+    title : str
+        Figure title identifying the model and patient partition.
+    """
+    figure, axis = plt.subplots(figsize=(8, 4.5))
+    bins = np.linspace(0, 2, 81).tolist()
+    for kind, name, colour in (
+        (0, "Benign–benign", COLOURS[0]), (1, "Melanoma–benign", "#7f7f7f"), (2, "Melanoma–melanoma", COLOURS[1])
+    ):
+        values = distances[pair_types == kind]
+        label = f"{name} · {len(values):,} pairs · mean {values.mean():.2f}"
+        axis.hist(values, bins, density=True, histtype="step", linewidth=2, color=colour, label=label)
+    axis.set(title=title, xlabel="Embedding distance (unit-length embeddings, 0–2)", ylabel="Density")
+    axis.legend(fontsize=9)
+    _save(figure, path)
+
+
+def plot_cases(cases: list[dict[str, Any]], path: Path) -> None:
     """Save query images beside their nearest training references.
 
     Parameters
@@ -297,17 +365,25 @@ def plot_cases(cases: list[dict], path: Path) -> None:
     Images are thumbnails of the originals, not the model's input crops.
     """
     figure, axes = plt.subplots(len(cases), 2, figsize=(7.5, 3.9 * len(cases)), squeeze=False)
-    for (query, reference), case in zip(axes, cases):
+    for (query, reference), case in zip(axes, cases, strict=True):
         query.imshow(_thumbnail(case["path"]))
-        query.set_title(f"{case['image_name']} · actual {case['actual']}\np = {case['probability']:.3g} → {case['decision']}\nreference score = {case['reference_score']:.2f}", fontsize=9)
+        query.set_title(
+            f"{case['image_name']} · actual {case['actual']}\np = {case['probability']:.3g} → {case['decision']}"
+            f"\nreference score = {case['reference_score']:.2f}",
+            fontsize=9,
+        )
         reference.imshow(_thumbnail(case["reference_path"]))
-        reference.set_title(f"Nearest reference {case['reference_name']}\nactual {case['reference_actual']}", fontsize=9)
+        reference.set_title(
+            f"Nearest reference {case['reference_name']}\nactual {case['reference_actual']}", fontsize=9
+        )
         query.axis("off")
         reference.axis("off")
     _save(figure, path)
 
 
-def plot_case_comparison(samples: list[Sample], predictions: dict[str, dict[str, np.ndarray]], image_size: int, path: Path) -> None:
+def plot_case_comparison(
+    samples: list[Sample], predictions: dict[str, dict[str, np.ndarray]], image_size: int, path: Path
+) -> None:
     """Show original images, evaluation crops and both models' results.
 
     Parameters
@@ -330,16 +406,21 @@ def plot_case_comparison(samples: list[Sample], predictions: dict[str, dict[str,
     """
     dataset = ISICDataset(samples, image_size)
     figure, axes = plt.subplots(len(samples), 2, figsize=(8, 4.6 * len(samples)), squeeze=False)
-    for index, (sample, (original, cropped)) in enumerate(zip(samples, axes)):
+    for index, (sample, (original, cropped)) in enumerate(zip(samples, axes, strict=True)):
         normalised, _ = dataset[index]
         image = normalised.permute(1, 2, 0).numpy() * np.asarray(STD) + np.asarray(MEAN)
         original.imshow(_thumbnail(sample.path))
         cropped.imshow(image.clip(0, 1))
-        original.set_title(f"{sample.image_name} · actual {('benign', 'melanoma')[sample.label]}\nOriginal image", fontsize=11)
+        actual = ("benign", "melanoma")[sample.label]
+        original.set_title(f"{sample.image_name} · actual {actual}\nOriginal image", fontsize=11)
         cropped.set_title(f"Evaluation input (both models)\n{image_size} × {image_size} centre crop", fontsize=11)
         for axis, model in ((original, "baseline"), (cropped, "siamese")):
             values = predictions[model]
-            axis.set_xlabel(f"{model.capitalize()}: p={values['probability'][index]:.6g}, r={values['reference_score'][index]:.3f}\nOutput: {values['decision'][index]}", fontsize=10)
+            axis.set_xlabel(
+                f"{model.capitalize()}: p={values['probability'][index]:.6g}, "
+                f"r={values['reference_score'][index]:.3f}\nOutput: {values['decision'][index]}",
+                fontsize=10,
+            )
             axis.set(xticks=[], yticks=[])
             for spine in axis.spines.values():
                 spine.set_visible(False)
