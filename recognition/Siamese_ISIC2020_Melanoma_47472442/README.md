@@ -197,7 +197,7 @@ Workload counts both melanoma flags and review outputs. Capture is the proportio
 
 ### Learning Curves
 
-For seed 42, selection AUROC peaks at epoch 5 for the baseline and epoch 3 for Siamese. Falling training loss does not ensure better selection performance. The baseline also computes contrastive loss as a diagnostic, with zero weight; its decline shows that classification alone changes embedding structure.
+For seed 42, selection AUROC peaks at epoch 5 for the baseline and epoch 3 for Siamese. Falling training loss does not ensure better selection performance. Longer schedules confirm this: seed-42 Siamese runs trained for 15 and 24 epochs peaked mid-training (epochs 6 and 9), then selection AUROC fell to 0.86 and 0.78 by the final epoch while training contrastive loss kept falling, so selecting the checkpoint by epoch, not training longer, guards against overfitting. The baseline also computes contrastive loss as a diagnostic, with zero weight; its decline shows that classification alone changes embedding structure.
 
 ![Baseline training and selection metrics](figures/training_baseline.svg)
 
